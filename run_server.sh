@@ -17,6 +17,8 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+MODEL_NAME = 'bigscience/bloom-7b1-petals'
+
 def detect_existing_swarm(discovery, model_name, timeout=10):
     """Check if there's an existing swarm on the local network."""
     logger.info('Checking for existing swarm...')
@@ -39,7 +41,7 @@ def run_server(existing_peer=None):
     cmd = [
         'python3', '-m', 'petals.cli.run_server',
         '--port', '31330',
-        '--converted_model_name_or_path', 'bigscience/bloom-7b1-petals',
+        '--converted_model_name_or_path', MODEL_NAME,
         '--device', 'mps',
         '--torch_dtype', 'float16'
     ]
@@ -56,15 +58,15 @@ def run_server(existing_peer=None):
     return subprocess.Popen(cmd)
 
 def main():
-    # Try to acquire the process lock
-    with PetalsProcessLock().acquire_context(timeout=30) as lock:
+    # Try to acquire the process lock with model information for memory checks
+    with PetalsProcessLock(model_name=MODEL_NAME).acquire_context(timeout=30) as lock:
         logger.info('Successfully acquired process lock')
         
         # Start service discovery
         discovery = PetalsServiceDiscovery()
         
         # Check for existing swarm
-        existing_peer = detect_existing_swarm(discovery, 'bigscience/bloom-7b1-petals')
+        existing_peer = detect_existing_swarm(discovery, MODEL_NAME)
         
         # Start the server
         server_process = run_server(existing_peer)
@@ -74,7 +76,7 @@ def main():
             time.sleep(5)  # Wait for server to start
             discovery.start_advertising(
                 port=31330,
-                model_name='bigscience/bloom-7b1-petals',
+                model_name=MODEL_NAME,
                 device='mps'
             )
         

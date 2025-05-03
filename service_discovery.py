@@ -38,23 +38,32 @@ class PetalsServiceDiscovery:
                 # Generate a hash that will be consistent for this machine
                 identity_hash = hashlib.sha256(machine_id.encode()).digest()
                 
-                # Create a proper libp2p peer ID:
-                # 1. Create a multihash (sha2-256 + digest)
-                # multihash format: <hash-func-code><digest-length><digest-value>
+                # Create a proper libp2p peer ID using multihash
+                # Format: <hash-func-code><digest-length><digest-value>
                 mh = bytes([self.HASH_FUNC]) + bytes([len(identity_hash)]) + identity_hash
                 
-                # 2. Encode with base58btc (what libp2p expects)
+                # Encode with base58btc (what libp2p expects)
                 self._peer_id = base58.b58encode(mh).decode()
                 
                 logger.debug(f"Generated peer ID: {self._peer_id}")
                 
                 # Validate the peer ID format
                 try:
-                    # Attempt to decode it - this will fail if format is wrong
+                    # Decode and validate the multihash
                     decoded = base58.b58decode(self._peer_id)
-                    hash_func, _ = multihash.decode(decoded)
-                    if hash_func != self.HASH_FUNC:  # Check if it's sha2-256
+                    if len(decoded) < 3:
+                        raise ValueError("Multihash too short")
+                    
+                    # Extract components
+                    hash_func = decoded[0]
+                    length = decoded[1]
+                    digest = decoded[2:]
+                    
+                    if hash_func != self.HASH_FUNC:
                         raise ValueError(f"Wrong hash algorithm: {hash_func}")
+                    if length != len(digest):
+                        raise ValueError(f"Invalid digest length: {length} != {len(digest)}")
+                        
                 except Exception as e:
                     logger.error(f"Validation failed for generated peer ID: {e}")
                     self._peer_id = None
@@ -182,10 +191,19 @@ class PetalsServiceDiscovery:
                 try:
                     # Validate the peer ID format
                     decoded = base58.b58decode(peer_id)
-                    hash_func, _ = multihash.decode(decoded)
+                    if len(decoded) < 3:
+                        raise ValueError("Multihash too short")
+                    
+                    # Extract components
+                    hash_func = decoded[0]
+                    length = decoded[1]
+                    digest = decoded[2:]
+                    
                     if hash_func != self.HASH_FUNC:
-                        logger.warning(f"Invalid hash function in peer ID from service {service.name}")
-                        continue
+                        raise ValueError(f"Wrong hash algorithm: {hash_func}")
+                    if length != len(digest):
+                        raise ValueError(f"Invalid digest length: {length} != {len(digest)}")
+                        
                 except Exception as e:
                     logger.warning(f"Invalid peer ID format from service {service.name}: {e}")
                     continue
