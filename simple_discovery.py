@@ -5,11 +5,24 @@ import logging
 import base58
 import hashlib
 import os
+import subprocess
 
+# Configure logging with git hash and line numbers
+logging.basicConfig(
+    format='%(asctime)s [%(levelname)s] %(filename)s:%(lineno)d (%(funcName)s) - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 logger = logging.getLogger(__name__)
 
 DISCOVERY_PORT = 31338
 DISCOVERY_TIMEOUT = 5  # seconds
+
+def get_git_hash():
+    """Get the current git hash."""
+    try:
+        return subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD']).decode().strip()
+    except:
+        return 'unknown'
 
 class SimplePeerDiscovery:
     """Simple UDP-based peer discovery for Petals network."""
@@ -20,6 +33,8 @@ class SimplePeerDiscovery:
         self.is_running = False
         self.lock = threading.Lock()
         self._peer_id = None
+        self.git_hash = get_git_hash()
+        logger.info(f"Initialized SimplePeerDiscovery (git: {self.git_hash})")
         
     @property
     def peer_id(self):
@@ -55,7 +70,6 @@ class SimplePeerDiscovery:
                 with open('/etc/machine-id', 'r') as f:
                     return f.read().strip()
             # Fallback to using hardware info on macOS
-            import subprocess
             result = subprocess.run(['system_profiler', 'SPHardwareDataType'], 
                                  capture_output=True, text=True)
             # Extract serial number or hardware UUID
@@ -89,7 +103,7 @@ class SimplePeerDiscovery:
         
         self.listen_thread = threading.Thread(target=self._listen, daemon=True)
         self.listen_thread.start()
-        logger.info("Started peer discovery")
+        logger.info(f"Started peer discovery (git: {self.git_hash})")
         
     def _listen(self):
         """Listen for peer announcements."""
@@ -98,6 +112,9 @@ class SimplePeerDiscovery:
                 data, _ = self.sock.recvfrom(2048)
                 with self.lock:
                     for line in data.decode().splitlines():
+                        # Ensure the peer address has the correct format
+                        if not line.endswith(f"/p2p/{self.peer_id}"):
+                            line = f"{line}/p2p/{self.peer_id}"
                         self.heard_peers.add(line.strip())
             except socket.timeout:
                 pass
@@ -132,7 +149,7 @@ class SimplePeerDiscovery:
                     
         self.announce_thread = threading.Thread(target=announce, daemon=True)
         self.announce_thread.start()
-        logger.info(f"Started advertising peer on port {port}")
+        logger.info(f"Started advertising peer on port {port} (git: {self.git_hash})")
         
     def stop(self):
         """Stop peer discovery and advertising."""
@@ -140,4 +157,4 @@ class SimplePeerDiscovery:
         if self.sock:
             self.sock.close()
             self.sock = None
-        logger.info("Stopped peer discovery") 
+        logger.info(f"Stopped peer discovery (git: {self.git_hash})") 

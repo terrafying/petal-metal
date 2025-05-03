@@ -10,10 +10,21 @@ import subprocess
 from process_lock import PetalsProcessLock
 from simple_discovery import SimplePeerDiscovery
 
-logging.basicConfig(level=logging.INFO)
+# Configure logging with git hash and line numbers
+logging.basicConfig(
+    format='%(asctime)s [%(levelname)s] %(filename)s:%(lineno)d (%(funcName)s) - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 logger = logging.getLogger(__name__)
 
 MODEL_NAME = "bigscience/bloom-7b1-petals"
+
+def get_git_hash():
+    """Get the current git hash."""
+    try:
+        return subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD']).decode().strip()
+    except:
+        return 'unknown'
 
 def run_server(existing_peer=None):
     """Start the Petals server process."""
@@ -30,6 +41,7 @@ def run_server(existing_peer=None):
     else:
         cmd.append("--new_swarm")
         
+    logger.info(f"Starting server with command: {' '.join(cmd)} (git: {get_git_hash()})")
     return subprocess.Popen(cmd)
 
 def detect_existing_swarm(discovery, model_name, timeout=10):
