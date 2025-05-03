@@ -146,6 +146,24 @@ class UnifiedDiscovery:
                                 logger.debug(f"Found peer via mDNS: {peer_addr}")
                         except Exception as e:
                             logger.warning(f"Failed to process mDNS service: {e}")
+                
+                def remove_service(self, zeroconf, type, name):
+                    """Handle service removal."""
+                    try:
+                        info = zeroconf.get_service_info(type, name)
+                        if info:
+                            addr = info.properties.get(b'ip', b'').decode() or socket.inet_ntoa(info.addresses[0])
+                            port = info.port
+                            peer_id = info.properties.get(b'peer_id', b'').decode()
+                            
+                            if peer_id:
+                                peer_addr = f"/ip4/{addr}/tcp/{port}/p2p/{peer_id}"
+                                with self.discovery.lock:
+                                    if peer_addr in self.discovery.peers:
+                                        self.discovery.peers.remove(peer_addr)
+                                        logger.debug(f"Removed peer via mDNS: {peer_addr}")
+                    except Exception as e:
+                        logger.warning(f"Failed to process mDNS service removal: {e}")
             
             self._mdns_zeroconf = Zeroconf()
             self._mdns_browser = ServiceBrowser(
