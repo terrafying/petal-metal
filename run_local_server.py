@@ -8,6 +8,7 @@ from typing import Optional
 from process_lock import PetalsProcessLock
 from unified_discovery import UnifiedDiscovery
 from petals.server.server import Server
+import torch
 
 # Configure logging
 logging.basicConfig(
@@ -49,6 +50,9 @@ def run_server(existing_peer: Optional[str] = None):
         logger.info(f"Using device config: {device_config}")
         
         # Initialize server with minimal required configuration
+        # Set default tensor type before server initialization
+        torch.set_default_dtype(torch.float32 if device_config["torch_dtype"] == "float32" else torch.float16)
+        
         server = Server(
             converted_model_name_or_path=MODEL_NAME,
             device=device_config["device"],
