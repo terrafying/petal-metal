@@ -2,6 +2,9 @@ import socket
 import threading
 import time
 import logging
+import base58
+import hashlib
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +19,60 @@ class SimplePeerDiscovery:
         self.sock = None
         self.is_running = False
         self.lock = threading.Lock()
+        self._peer_id = None
+        
+    @property
+    def peer_id(self):
+        """Generate or return a stable peer ID for this instance."""
+        if self._peer_id is None:
+            try:
+                # Create a stable peer ID based on machine-specific information
+                machine_id = self._get_machine_id()
+                
+                # Generate a hash that will be consistent for this machine
+                identity_hash = hashlib.sha256(machine_id.encode()).digest()
+                
+                # Create a proper libp2p peer ID using multihash
+                # Format: <hash-func-code><digest-length><digest-value>
+                mh = bytes([0x12]) + bytes([len(identity_hash)]) + identity_hash
+                
+                # Encode with base58btc (what libp2p expects)
+                self._peer_id = base58.b58encode(mh).decode()
+                
+                logger.debug(f"Generated peer ID: {self._peer_id}")
+                
+            except Exception as e:
+                logger.error(f"Failed to generate peer ID: {e}")
+                raise RuntimeError(f"Failed to generate valid peer ID: {e}")
+            
+        return self._peer_id
+    
+    def _get_machine_id(self) -> str:
+        """Get a stable machine identifier."""
+        try:
+            # Try to use the system's machine ID first
+            if os.path.exists('/etc/machine-id'):
+                with open('/etc/machine-id', 'r') as f:
+                    return f.read().strip()
+            # Fallback to using hardware info on macOS
+            import subprocess
+            result = subprocess.run(['system_profiler', 'SPHardwareDataType'], 
+                                 capture_output=True, text=True)
+            # Extract serial number or hardware UUID
+            for line in result.stdout.split('\n'):
+                if 'Serial Number' in line or 'Hardware UUID' in line:
+                    return line.split(':')[1].strip()
+        except Exception as e:
+            logger.warning(f"Failed to get machine ID: {e}")
+        
+        # Final fallback: use hostname + MAC address if available
+        hostname = socket.gethostname()
+        try:
+            import uuid
+            mac = hex(uuid.getnode())[2:]
+        except:
+            mac = "000000000000"
+        return f"{hostname}-{mac}"
         
     def start_discovery(self):
         """Start discovering peers on the local network."""
@@ -64,8 +121,8 @@ class SimplePeerDiscovery:
                     hostname = socket.gethostname()
                     local_ip = socket.gethostbyname(hostname)
                     
-                    # Create peer address
-                    peer_addr = f"/ip4/{local_ip}/tcp/{port}"
+                    # Create peer address with peer ID
+                    peer_addr = f"/ip4/{local_ip}/tcp/{port}/p2p/{self.peer_id}"
                     
                     # Send announcement
                     self.sock.sendto(peer_addr.encode(), ('<broadcast>', DISCOVERY_PORT))
