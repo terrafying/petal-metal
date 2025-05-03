@@ -1,4 +1,5 @@
-brew install python pipenv 
-python3 -m pip install git+https://github.com/bigscience-workshop/petals python3 -m petals.cli.run_server 
-meta-llama/Meta-Llama-3.1-405B-Instruct
+brew install python pipenv
+python3 -m venv .venv ||:
+source .venv/bin/activate ||:
+python -m pip install -e ./git_petals
 
