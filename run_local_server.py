@@ -9,6 +9,9 @@ from process_lock import PetalsProcessLock
 from unified_discovery import UnifiedDiscovery
 from petals.server.server import Server
 import torch
+import base58
+import hashlib
+import uuid
 
 # Configure logging
 logging.basicConfig(
@@ -19,6 +22,14 @@ logger = logging.getLogger(__name__)
 
 MODEL_NAME = "bigscience/bloom-7b1-petals"
 SERVER_PORT = 31330
+
+def generate_peer_id() -> str:
+    """Generate a simple peer ID that doesn't rely on cid."""
+    # Generate a random UUID and hash it
+    random_bytes = uuid.uuid4().bytes
+    hash_bytes = hashlib.sha256(random_bytes).digest()
+    # Use base58 encoding for the final ID
+    return base58.b58encode(hash_bytes).decode()
 
 def get_device_config():
     """Get device configuration based on available hardware."""
@@ -40,6 +51,10 @@ def get_device_config():
 def run_server(existing_peer: Optional[str] = None):
     """Run a Petals server instance."""
     try:
+        # Generate peer ID
+        peer_id = generate_peer_id()
+        logger.info(f"Generated peer ID: {peer_id}")
+        
         # Initialize discovery
         discovery = UnifiedDiscovery()
         discovery.start_discovery()
@@ -53,14 +68,18 @@ def run_server(existing_peer: Optional[str] = None):
         # Set default tensor type before server initialization
         torch.set_default_dtype(torch.float32 if device_config["torch_dtype"] == "float32" else torch.float16)
         
-        server = Server(
-            converted_model_name_or_path=MODEL_NAME,
-            device=device_config["device"],
-            torch_dtype=device_config["torch_dtype"],
-            initial_peers=[existing_peer] if existing_peer else None,
-            dht_prefix=device_config["dht_prefix"],
-            throughput=device_config["throughput"]
-        )
+        # Create server configuration
+        server_config = {
+            "converted_model_name_or_path": MODEL_NAME,
+            "device": device_config["device"],
+            "torch_dtype": device_config["torch_dtype"],
+            "initial_peers": [existing_peer] if existing_peer else None,
+            "dht_prefix": device_config["dht_prefix"],
+            "throughput": device_config["throughput"]
+        }
+        
+        # Initialize server
+        server = Server(**server_config)
         
         # Start advertising
         discovery.start_advertising(
