@@ -37,7 +37,7 @@ def run_server(existing_peer=None):
         '--converted_model_name_or_path', MODEL_NAME,
         '--device', device,
         '--torch_dtype', dtype,
-        '--max_batch_size', '1',  # Reduce batch size for better stability
+        '--max_batch_size', '2',  # Reduce batch size for better stability
         '--max_chunk_size_bytes', '1024'  # Reduce chunk size for better stability
     ]
     

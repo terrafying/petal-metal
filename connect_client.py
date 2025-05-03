@@ -1,4 +1,4 @@
-from service_discovery import PetalsServiceDiscovery
+from simple_discovery import SimplePeerDiscovery
 from process_lock import PetalsProcessLock
 from petals import AutoDistributedModelForCausalLM
 from transformers import AutoTokenizer
@@ -14,7 +14,7 @@ class PetalsClient:
     
     def __init__(self, model_name: str = "bigscience/bloom-7b1-petals"):
         self.model_name = model_name
-        self.discovery = PetalsServiceDiscovery()
+        self.discovery = SimplePeerDiscovery()
         self.process_lock = PetalsProcessLock()
         self.model = None
         self.tokenizer = None

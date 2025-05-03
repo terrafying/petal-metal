@@ -4,8 +4,8 @@ from transformers import AutoTokenizer
 from petals import DistributedBloomForCausalLM
 
 os.environ["PETALS_SERVERS"] = ",".join([
-  "minipro24.local:22100",
-  "localhost:22100",
+  "minipro24.local:31337",
+  "/ip4/192.168.1.223/tcp/31337/p2p/12D3KooWNmsW2o8P9UUbxYWzav9jQuqgpi3ExZ77gm8vjxRmkSMT",
   # …etc
 ])
 

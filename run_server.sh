@@ -1,23 +1,36 @@
-#!/bin/bash
+#!/usr/bin/env python3
 
-# Install required dependencies
-pip install zeroconf psutil
-
-# Start the Petals server with service discovery and process locking
-python3 -c "
-from service_discovery import PetalsServiceDiscovery
-from process_lock import PetalsProcessLock
-import subprocess
-import threading
-import signal
+import os
 import sys
 import time
+import signal
 import logging
+import threading
+import subprocess
+from process_lock import PetalsProcessLock
+from simple_discovery import SimplePeerDiscovery
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-MODEL_NAME = 'bigscience/bloom-7b1-petals'
+MODEL_NAME = "bigscience/bloom-7b1-petals"
+
+def run_server(existing_peer=None):
+    """Start the Petals server process."""
+    cmd = [
+        "python", "-m", "petals.cli.run_server",
+        "--converted_model_name_or_path", MODEL_NAME,
+        "--device", "mps",
+        "--port", "31330",
+        "--torch_dtype", "float16"
+    ]
+    
+    if existing_peer:
+        cmd.extend(["--initial_peers", existing_peer])
+    else:
+        cmd.append("--new_swarm")
+        
+    return subprocess.Popen(cmd)
 
 def detect_existing_swarm(discovery, model_name, timeout=10):
     """Check if there's an existing swarm on the local network."""
@@ -27,35 +40,17 @@ def detect_existing_swarm(discovery, model_name, timeout=10):
     # Wait briefly for peer discovery
     start_time = time.time()
     while time.time() - start_time < timeout:
-        peers = discovery.get_peers(model_name)
-        if peers:
-            logger.info(f'Found existing swarm peers: {peers}')
-            return peers[0]  # Return the first peer's address
+        try:
+            peers = discovery.get_peers(model_name)
+            if peers:
+                logger.info(f'Found existing swarm peers: {peers}')
+                return peers[0]  # Return the first peer's address
+        except Exception as e:
+            logger.warning(f"Error during peer discovery: {e}")
         time.sleep(1)
     
     logger.info('No existing swarm found')
     return None
-
-def run_server(existing_peer=None):
-    """Start the server either as new swarm or joining existing one."""
-    cmd = [
-        'python3', '-m', 'petals.cli.run_server',
-        '--port', '31330',
-        '--converted_model_name_or_path', MODEL_NAME,
-        '--device', 'mps',
-        '--torch_dtype', 'float16'
-    ]
-    
-    if existing_peer:
-        # Join existing swarm
-        cmd.extend(['--initial_peers', existing_peer])
-        logger.info(f'Starting server to join existing peer: {existing_peer}')
-    else:
-        # Start new swarm
-        cmd.append('--new_swarm')
-        logger.info('Starting server as new swarm')
-    
-    return subprocess.Popen(cmd)
 
 def main():
     # Try to acquire the process lock with model information for memory checks
@@ -63,7 +58,7 @@ def main():
         logger.info('Successfully acquired process lock')
         
         # Start service discovery
-        discovery = PetalsServiceDiscovery()
+        discovery = SimplePeerDiscovery()
         
         # Check for existing swarm
         existing_peer = detect_existing_swarm(discovery, MODEL_NAME)
@@ -101,5 +96,4 @@ if __name__ == '__main__':
         main()
     except RuntimeError as e:
         print(f'Error: {e}')
-        sys.exit(1)
-" 
+        sys.exit(1) 

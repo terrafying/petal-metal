@@ -7,6 +7,7 @@ import tempfile
 import subprocess
 from typing import Optional, Tuple, Dict
 from contextlib import contextmanager
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -81,187 +82,105 @@ class GPUMemoryMonitor:
         return MODEL_SIZES.get(base_model, 8 * 1024 * 1024 * 1024)  # Default 8GB
 
 class PetalsProcessLock:
-    """
-    Process locking mechanism for Petals to prevent multiple instances from overloading the machine.
-    Uses file-based locking which is reliable on macOS/Unix systems.
-    """
+    """Process lock to prevent multiple Petals instances from running simultaneously."""
     
-    def __init__(self, lock_file: Optional[str] = None, model_name: Optional[str] = None):
-        """
-        Initialize the process lock.
-        
-        Args:
-            lock_file: Optional path to lock file. If None, uses a default path in /tmp
-            model_name: Name of the model for memory requirement estimation
-        """
-        if lock_file is None:
-            lock_file = os.path.join(tempfile.gettempdir(), "petals_process.lock")
-        self.lock_file = lock_file
-        self.lock_fd = None
+    def __init__(self, model_name=None, timeout=30):
+        self.lock_file = "/tmp/petals.lock"
+        self.timeout = timeout
         self.model_name = model_name
-        self.gpu_monitor = GPUMemoryMonitor()
+        self.lock = threading.Lock()
         
-    def _check_gpu_memory(self) -> Tuple[bool, str]:
-        """
-        Check if there's enough GPU memory available.
-        
-        Returns:
-            Tuple of (bool, str) indicating if memory is sufficient and why/why not
-        """
-        if not self.model_name:
-            return True, "No model specified for memory check"
-            
+    def _check_memory(self):
+        """Check if system has enough memory for the model."""
         try:
-            gpu_mem = self.gpu_monitor.get_gpu_memory()
-            required = self.gpu_monitor.estimate_model_memory_requirement(self.model_name)
+            # Get system memory info
+            mem = psutil.virtual_memory()
+            total_gb = mem.total / (1024**3)
+            available_gb = mem.available / (1024**3)
+            used_percent = mem.percent
             
-            # Calculate memory requirement with buffer
-            required_with_buffer = int(required * 1.2)  # Add 20% buffer
-            
-            if gpu_mem['free'] < required_with_buffer:
-                return False, (
-                    f"Insufficient GPU memory. Required: {required_with_buffer / 1024**3:.1f}GB "
-                    f"(including buffer), Available: {gpu_mem['free'] / 1024**3:.1f}GB"
-                )
-            
-            # Check if we're trying to use too much of total memory
-            max_safe_usage = int(gpu_mem['total'] * 0.9)  # Don't use more than 90%
-            if (gpu_mem['used'] + required) > max_safe_usage:
-                return False, (
-                    f"Would exceed safe GPU memory usage. "
-                    f"Total: {gpu_mem['total'] / 1024**3:.1f}GB, "
-                    f"Currently used: {gpu_mem['used'] / 1024**3:.1f}GB, "
-                    f"Required: {required / 1024**3:.1f}GB"
-                )
-            
-            return True, "Sufficient GPU memory available"
-            
-        except Exception as e:
-            logger.warning(f"Error checking GPU memory: {e}")
-            return True, "Could not check GPU memory, proceeding with caution"
-                
-    def acquire(self, timeout: int = 10, check_resource_limits: bool = True) -> bool:
-        """
-        Acquire the process lock.
-        
-        Args:
-            timeout: Maximum time to wait for lock in seconds
-            check_resource_limits: Whether to check system resources before acquiring
-            
-        Returns:
-            bool: True if lock was acquired successfully
-        """
-        if check_resource_limits:
-            # Check GPU memory first
-            gpu_mem_ok, gpu_mem_msg = self._check_gpu_memory()
-            if not gpu_mem_ok:
-                logger.warning(f"GPU memory check failed: {gpu_mem_msg}")
-                return False
-            
-            # Check other system resources
-            if not self._check_resources():
-                return False
-            
-        start_time = time.time()
-        while True:
+            # For MPS devices, we'll be more lenient with memory requirements
+            is_mps = False
             try:
-                # Create or open the lock file
-                self.lock_fd = open(self.lock_file, 'w')
+                is_mps = "mps" in str(subprocess.check_output(["python", "-c", "import torch; print(torch.device('mps'))"]))
+            except:
+                pass
                 
-                # Try to acquire an exclusive lock
-                fcntl.flock(self.lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                
-                # Write current process ID to lock file
-                self.lock_fd.write(str(os.getpid()))
-                self.lock_fd.flush()
-                
-                logger.info("Successfully acquired Petals process lock")
-                return True
-                
-            except (IOError, OSError) as e:
-                if time.time() - start_time > timeout:
-                    logger.warning(f"Failed to acquire lock after {timeout} seconds")
+            if is_mps:
+                # For MPS devices, we'll use a percentage-based approach
+                # Allow up to 90% memory usage since MPS can handle memory more efficiently
+                if used_percent > 90:
+                    logger.warning(f"Memory usage too high: {used_percent}%")
                     return False
                     
-                # Check if the process holding the lock is still alive
-                try:
-                    with open(self.lock_file, 'r') as f:
-                        pid = int(f.read().strip())
-                        if not psutil.pid_exists(pid):
-                            logger.info(f"Found stale lock from dead process {pid}, removing")
-                            os.remove(self.lock_file)
-                            continue
-                except (IOError, ValueError):
-                    pass
+                # Also ensure we have at least 4GB available
+                if available_gb < 4.0:
+                    logger.warning(f"Insufficient available memory: {available_gb:.1f}GB")
+                    return False
+            else:
+                # Standard GPU requirements
+                required_gb = 9.6
+                if available_gb < required_gb:
+                    logger.warning(f"Insufficient memory. Required: {required_gb:.1f}GB, Available: {available_gb:.1f}GB")
+                    return False
                 
-                time.sleep(1)
-                continue
-                
-    def release(self):
-        """Release the process lock."""
-        if self.lock_fd is not None:
-            try:
-                fcntl.flock(self.lock_fd.fileno(), fcntl.LOCK_UN)
-                self.lock_fd.close()
-                os.remove(self.lock_file)
-                logger.info("Released Petals process lock")
-            except (IOError, OSError) as e:
-                logger.error(f"Error releasing lock: {e}")
-            finally:
-                self.lock_fd = None
-                
-    def _check_resources(self) -> bool:
-        """
-        Check if system has enough resources to run Petals.
-        
-        Returns:
-            bool: True if system has sufficient resources
-        """
-        try:
-            # Check CPU usage
-            cpu_percent = psutil.cpu_percent(interval=1)
-            if cpu_percent > 90:
-                logger.warning(f"CPU usage too high: {cpu_percent}%")
-                return False
-                
-            # Check memory usage
-            mem = psutil.virtual_memory()
-            if mem.percent > 90:
-                logger.warning(f"Memory usage too high: {mem.percent}%")
-                return False
-                
-            # Check disk space
-            disk = psutil.disk_usage('/')
-            if disk.percent > 95:
-                logger.warning(f"Disk usage too high: {disk.percent}%")
-                return False
-                
+            logger.info(f"System memory: {total_gb:.1f}GB total, {available_gb:.1f}GB available ({used_percent}% used)")
             return True
             
         except Exception as e:
-            logger.error(f"Error checking system resources: {e}")
-            return False
+            logger.warning(f"Memory check failed: {e}")
+            # Be more lenient if we can't check memory
+            return True
+            
+    def acquire(self, timeout=None, check_resource_limits=True):
+        """Try to acquire the process lock."""
+        timeout = timeout or self.timeout
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            try:
+                # Check if lock file exists
+                if os.path.exists(self.lock_file):
+                    # Check if process is still running
+                    try:
+                        with open(self.lock_file, 'r') as f:
+                            pid = int(f.read().strip())
+                        if psutil.pid_exists(pid):
+                            time.sleep(1)
+                            continue
+                    except:
+                        pass
+                        
+                # Check resource limits if requested
+                if check_resource_limits and not self._check_memory():
+                    return False
+                    
+                # Create lock file
+                with open(self.lock_file, 'w') as f:
+                    f.write(str(os.getpid()))
+                return True
+                
+            except Exception as e:
+                logger.error(f"Error acquiring lock: {e}")
+                time.sleep(1)
+                
+        return False
+        
+    def release(self):
+        """Release the process lock."""
+        try:
+            if os.path.exists(self.lock_file):
+                os.remove(self.lock_file)
+        except Exception as e:
+            logger.error(f"Error releasing lock: {e}")
             
     @contextmanager
-    def acquire_context(self, timeout: int = 10, check_resource_limits: bool = True):
-        """
-        Context manager for acquiring and releasing the lock.
-        
-        Args:
-            timeout: Maximum time to wait for lock
-            check_resource_limits: Whether to check system resources
-        """
-        try:
-            if not self.acquire(timeout, check_resource_limits):
-                raise RuntimeError("Failed to acquire Petals process lock")
-            yield
-        finally:
-            self.release()
-            
-    def __enter__(self):
-        if not self.acquire():
-            raise RuntimeError("Failed to acquire Petals process lock")
-        return self
-        
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.release() 
+    def acquire_context(self, timeout=None, check_resource_limits=True):
+        """Context manager for acquiring and releasing the lock."""
+        if self.acquire(timeout, check_resource_limits):
+            try:
+                yield self
+            finally:
+                self.release()
+        else:
+            raise RuntimeError("Failed to acquire Petals process lock") 
