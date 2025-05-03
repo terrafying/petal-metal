@@ -11,21 +11,32 @@ PEERS = [
 from hivemind import DHT
 from petals.utils.dht import get_remote_module_infos
 
-dht = DHT(initial_peers=PEERS, start=True)
+# Configure DHT with explicit transport settings
+dht = DHT(
+    initial_peers=PEERS,
+    start=True,
+    client_mode=True,
+    host_maddrs=["/ip4/0.0.0.0/tcp/0", "/ip6/::/tcp/0"],  # Listen on all interfaces
+    announce_maddrs=[],  # Don't announce any addresses
+    use_relay=False,  # Disable relay to avoid complexity
+    use_auto_relay=False,  # Disable auto relay
+    startup_timeout=30,  # Shorter timeout for faster feedback
+)
+
 infos = get_remote_module_infos(dht)
 for info in infos:
-    # info.block_id is e.g. "bigscience/bloom-7b1-petals.3"
-    # info.peer_id is the PeerID string
     print(info.block_id, "→", info.peer_id)
+
 config = ClientConfig(
     initial_peers=PEERS,
-    show_route="inference",   # ← prints the route
-    # skip_reachability_check=True,  # if you’re still using that hack
-    # no_relay=True
+    show_route="inference",
+    use_relay=False,
+    use_auto_relay=False,
+    daemon_startup_timeout=30,
 )
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL)
-model     = AutoDistributedModelForCausalLM.from_pretrained(
+model = AutoDistributedModelForCausalLM.from_pretrained(
     MODEL,
     config=config,
     torch_dtype="float32",
@@ -33,16 +44,5 @@ model     = AutoDistributedModelForCausalLM.from_pretrained(
 )
 
 inputs = tokenizer("Hello!", return_tensors="pt").to("mps")
-out    = model.generate(**inputs, max_new_tokens=5)
-print(tokenizer.decode(out[0], skip_special_tokens=True))
-
-
-from hivemind import DHT
-from petals.utils.dht import get_remote_module_infos
-
-dht = DHT(initial_peers=PEERS, start=True)
-infos = get_remote_module_infos(dht, prefix="bigscience/bloom-7b1-petals")
-for info in infos:
-    # info.block_id is e.g. "bigscience/bloom-7b1-petals.3"
-    # info.peer_id is the PeerID string
-    print(info.block_id, "→", info.peer_id)
+out = model.generate(**inputs, max_new_tokens=5)
+print(tokenizer.decode(out[0], skip_special_tokens=True)) 

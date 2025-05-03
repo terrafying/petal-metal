@@ -1,73 +1,71 @@
-from simple_discovery import SimplePeerDiscovery
-from process_lock import PetalsProcessLock
-from petals import AutoDistributedModelForCausalLM
-from transformers import AutoTokenizer
-import torch
-import time
 import logging
+import time
+import torch
+from transformers import AutoTokenizer
+from petals import AutoDistributedModelForCausalLM
+from unified_discovery import UnifiedDiscovery
 
-logging.basicConfig(level=logging.INFO)
+# Configure logging
+logging.basicConfig(
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 logger = logging.getLogger(__name__)
 
 class PetalsClient:
-    """Helper class to connect to Petals servers using service discovery."""
+    """Helper class to connect to Petals servers."""
     
-    def __init__(self, model_name: str = "bigscience/bloom-7b1-petals"):
+    def __init__(self, model_name: str):
         self.model_name = model_name
-        self.discovery = SimplePeerDiscovery()
-        self.process_lock = PetalsProcessLock()
+        self.discovery = UnifiedDiscovery()
         self.model = None
         self.tokenizer = None
         
     def connect(self, wait_for_peers: bool = True, timeout: int = 30) -> bool:
         """
-        Connect to available Petals servers.
+        Connect to Petals servers.
         
         Args:
-            wait_for_peers: If True, wait for peers to be discovered
+            wait_for_peers: Whether to wait for peers to be discovered
             timeout: Maximum time to wait for peers in seconds
             
         Returns:
-            bool: True if connection successful
+            bool: True if connection successful, False otherwise
         """
-        # Try to acquire the process lock with a shorter timeout and less strict resource checks
-        if not self.process_lock.acquire(timeout=5, check_resource_limits=False):
-            logger.warning("Another Petals process is running, proceeding with caution")
-        
-        logger.info("Starting service discovery...")
-        self.discovery.start_discovery()
-        
-        if wait_for_peers:
-            start_time = time.time()
-            while time.time() - start_time < timeout:
-                peers = self.discovery.get_peers(self.model_name)
-                if peers:
-                    break
-                logger.info("Waiting for peers...")
-                time.sleep(2)
+        try:
+            # Start discovery
+            self.discovery.start_discovery()
             
-            if not peers:
-                logger.error(f"No peers found after {timeout} seconds")
+            # Wait for peers if requested
+            if wait_for_peers:
+                start_time = time.time()
+                while time.time() - start_time < timeout:
+                    peers = self.discovery.get_peers()
+                    if peers:
+                        break
+                    time.sleep(1)
+            else:
+                peers = self.discovery.get_peers()
+            
+            if peers:
+                logger.info(f"Found peers: {peers}")
+                
+                # Initialize model and tokenizer
+                self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+                self.model = AutoDistributedModelForCausalLM.from_pretrained(
+                    self.model_name,
+                    initial_peers=peers,
+                    torch_dtype=torch.float32,
+                    device_map={"": "mps"},
+                )
+                
+                return True
+            else:
+                logger.warning("No peers found")
                 return False
-        else:
-            peers = self.discovery.get_peers(self.model_name)
-        
-        if peers:
-            logger.info(f"Found peers: {peers}")
-            
-            # Initialize model and tokenizer
-            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-            self.model = AutoDistributedModelForCausalLM.from_pretrained(
-                self.model_name,
-                initial_peers=peers,
-                dht_prefix=self.model_name,
-                torch_dtype=torch.float16,
-                device_map={"": "mps"},
-            )
-            
-            return True
-        else:
-            logger.warning("No peers found")
+                
+        except Exception as e:
+            logger.error(f"Error during connection: {e}")
             return False
     
     def generate(self, prompt: str, max_new_tokens: int = 20) -> str:
@@ -87,20 +85,17 @@ class PetalsClient:
         inputs = self.tokenizer(prompt, return_tensors="pt").to("mps")
         outputs = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
         return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-    
+        
     def close(self):
-        """Clean up resources."""
+        """Close the connection and cleanup resources."""
         if self.discovery:
             self.discovery.stop()
-        if self.process_lock:
-            self.process_lock.release()
-        # Model and tokenizer cleanup if needed
         self.model = None
         self.tokenizer = None
 
 def main():
     """Example usage of the PetalsClient."""
-    client = PetalsClient()
+    client = PetalsClient("bigscience/bloom-7b1-petals")
     try:
         if client.connect():
             # Example generation

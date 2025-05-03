@@ -7,8 +7,11 @@ import signal
 import logging
 import threading
 import subprocess
+import socket
+import base58
+import hashlib
 from process_lock import PetalsProcessLock
-from simple_discovery import SimplePeerDiscovery
+from simple_discovery import SimplePeerDiscovery, format_peer_address
 
 # Configure logging with git hash and line numbers
 logging.basicConfig(
@@ -27,13 +30,49 @@ def get_git_hash():
     except:
         return 'unknown'
 
+def generate_peer_id():
+    """Generate a valid peer ID for the server."""
+    try:
+        # Create a stable peer ID based on machine-specific information
+        hostname = socket.gethostname()
+        local_ip = socket.gethostbyname(hostname)
+        
+        # Generate a hash that will be consistent for this machine
+        identity_hash = hashlib.sha256(f"{hostname}-{local_ip}".encode()).digest()
+        
+        # Create a proper libp2p peer ID using multihash
+        # Format: <hash-func-code><digest-length><digest-value>
+        mh = bytes([0x12]) + bytes([len(identity_hash)]) + identity_hash
+        
+        # Encode with base58btc (what libp2p expects)
+        peer_id = base58.b58encode(mh).decode()
+        logger.info(f"Generated server peer ID: {peer_id}")
+        return peer_id
+        
+    except Exception as e:
+        logger.error(f"Failed to generate peer ID: {e}", exc_info=e, stack_info=True)
+        raise RuntimeError(f"Failed to generate valid peer ID: {e}")
+
 def run_server(existing_peer=None):
     """Start the Petals server process."""
+    # Get local IP address
+    hostname = socket.gethostname()
+    local_ip = socket.gethostbyname(hostname)
+    
+    # Generate a proper peer ID
+    peer_id = generate_peer_id()
+    
+    # Format the multiaddress with all required protocols
+    host_maddrs = [
+        f"/ip4/{local_ip}/tcp/{SERVER_PORT}/p2p/{peer_id}",
+        f"/ip4/127.0.0.1/tcp/{SERVER_PORT}/p2p/{peer_id}"
+    ]
+    
     cmd = [
         "python", "-m", "petals.cli.run_server",
         "--converted_model_name_or_path", MODEL_NAME,
         "--device", "mps",
-        "--host_maddrs", f"/ip4/0.0.0.0/tcp/{SERVER_PORT}",
+        "--host_maddrs", ",".join(host_maddrs),
         "--torch_dtype", "float16"
     ]
     

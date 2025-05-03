@@ -6,6 +6,8 @@ import base58
 import hashlib
 import os
 import subprocess
+from typing import Optional
+from cid import make_cid
 
 # Configure logging with git hash and line numbers
 logging.basicConfig(
@@ -23,6 +25,10 @@ def get_git_hash():
         return subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD']).decode().strip()
     except:
         return 'unknown'
+
+def format_peer_address(ip: str, port: int, peer_id: str) -> str:
+    """Format a peer address in the correct format for the P2P daemon."""
+    return f"/ip4/{ip}/tcp/{port}/p2p/{peer_id}"
 
 class SimplePeerDiscovery:
     """Simple UDP-based peer discovery for Petals network."""
@@ -47,18 +53,24 @@ class SimplePeerDiscovery:
                 # Generate a hash that will be consistent for this machine
                 identity_hash = hashlib.sha256(machine_id.encode()).digest()
                 
-                # Create a proper libp2p peer ID using multihash
-                # Format: <hash-func-code><digest-length><digest-value>
-                mh = bytes([0x12]) + bytes([len(identity_hash)]) + identity_hash
+                # Create a CID v1 with the identity hash
+                cid = make_cid(1, 'dag-pb', identity_hash)
                 
-                # Encode with base58btc (what libp2p expects)
-                self._peer_id = base58.b58encode(mh).decode()
+                # Get the base58btc encoded string (what libp2p expects)
+                self._peer_id = cid.encode('base58btc')
                 
                 logger.debug(f"Generated peer ID: {self._peer_id}")
                 
             except Exception as e:
                 logger.error(f"Failed to generate peer ID: {e}")
-                raise RuntimeError(f"Failed to generate valid peer ID: {e}")
+                # Fallback to a simpler format if CID generation fails
+                try:
+                    # Use a simpler format that's still unique
+                    self._peer_id = base58.b58encode(identity_hash).decode()
+                    logger.warning(f"Using fallback peer ID format: {self._peer_id}")
+                except Exception as e2:
+                    logger.error(f"Fallback peer ID generation also failed: {e2}")
+                    raise RuntimeError(f"Failed to generate valid peer ID: {e}")
             
         return self._peer_id
     
@@ -112,10 +124,39 @@ class SimplePeerDiscovery:
                 data, _ = self.sock.recvfrom(2048)
                 with self.lock:
                     for line in data.decode().splitlines():
-                        # Ensure the peer address has the correct format
-                        if not line.endswith(f"/p2p/{self.peer_id}"):
-                            line = f"{line}/p2p/{self.peer_id}"
-                        self.heard_peers.add(line.strip())
+                        try:
+                            # Parse the peer address
+                            parts = line.strip().split('/')
+                            if len(parts) < 5:
+                                logger.warning(f"Invalid peer address format: {line}")
+                                continue
+                                
+                            # Extract components
+                            ip = parts[2]
+                            port = int(parts[4])
+                            
+                            # Handle peer ID with proper CID format
+                            if len(parts) > 6:
+                                try:
+                                    # Try to parse as CID first
+                                    peer_id = parts[6]
+                                    # Validate the CID format
+                                    cid = make_cid(peer_id)
+                                    peer_id = cid.encode('base58btc')
+                                except Exception as e:
+                                    logger.warning(f"Invalid CID format for peer ID: {e}")
+                                    continue
+                            else:
+                                peer_id = self.peer_id
+                            
+                            # Format the address properly
+                            peer_addr = format_peer_address(ip, port, peer_id)
+                            self.heard_peers.add(peer_addr)
+                            logger.debug(f"Added peer: {peer_addr}")
+                            
+                        except Exception as e:
+                            logger.warning(f"Failed to parse peer address: {e}")
+                            
             except socket.timeout:
                 pass
             except Exception as e:
@@ -139,7 +180,7 @@ class SimplePeerDiscovery:
                     local_ip = socket.gethostbyname(hostname)
                     
                     # Create peer address with peer ID
-                    peer_addr = f"/ip4/{local_ip}/tcp/{port}/p2p/{self.peer_id}"
+                    peer_addr = format_peer_address(local_ip, port, self.peer_id)
                     
                     # Send announcement
                     self.sock.sendto(peer_addr.encode(), ('<broadcast>', DISCOVERY_PORT))

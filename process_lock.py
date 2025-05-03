@@ -173,9 +173,9 @@ class PetalsProcessLock:
                 time.sleep(1)
                 continue
             except Exception as e:
-                logger.error(f"Error acquiring lock: {e}")
+                logger.error(f"Error acquiring lock: {e}", exc_info=e)
                 self.release()
-                raise RuntimeError(f"Failed to acquire Petals process lock: {e}")
+                raise RuntimeError(f"Failed to acquire Petals process lock: {e}") from e
                 
         raise RuntimeError("Failed to acquire Petals process lock: timeout")
         

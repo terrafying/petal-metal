@@ -273,10 +273,6 @@ class Server:
         self.stop = threading.Event()
 
     def _choose_num_blocks(self) -> int:
-        assert self.device.type in ("cuda", "mps"), (
-            "GPU is not available. If you want to run a CPU-only server, please specify --num_blocks. "
-            "CPU-only servers in the public swarm are discouraged since they are much slower"
-        )
         num_devices = len(self.tensor_parallel_devices) if self.tensor_parallel_devices else 1
 
         if num_devices > 1:
