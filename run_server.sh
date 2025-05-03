@@ -18,6 +18,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 MODEL_NAME = "bigscience/bloom-7b1-petals"
+SERVER_PORT = 31330
 
 def get_git_hash():
     """Get the current git hash."""
@@ -32,13 +33,15 @@ def run_server(existing_peer=None):
         "python", "-m", "petals.cli.run_server",
         "--converted_model_name_or_path", MODEL_NAME,
         "--device", "mps",
-        "--port", "31330",
+        "--host_maddrs", f"/ip4/0.0.0.0/tcp/{SERVER_PORT}",
         "--torch_dtype", "float16"
     ]
     
     if existing_peer:
+        logger.info(f"Joining existing swarm with peer: {existing_peer}")
         cmd.extend(["--initial_peers", existing_peer])
     else:
+        logger.info("Creating new swarm")
         cmd.append("--new_swarm")
         
     logger.info(f"Starting server with command: {' '.join(cmd)} (git: {get_git_hash()})")
@@ -56,7 +59,12 @@ def detect_existing_swarm(discovery, model_name, timeout=10):
             peers = discovery.get_peers(model_name)
             if peers:
                 logger.info(f'Found existing swarm peers: {peers}')
-                return peers[0]  # Return the first peer's address
+                # Ensure the peer address has the correct format
+                peer_addr = peers[0]
+                if not peer_addr.startswith('/ip4/'):
+                    logger.warning(f"Invalid peer address format: {peer_addr}")
+                    continue
+                return peer_addr
         except Exception as e:
             logger.warning(f"Error during peer discovery: {e}")
         time.sleep(1)
@@ -81,11 +89,15 @@ def main():
         # Start advertising after a brief delay to ensure server is up
         def delayed_advertise():
             time.sleep(5)  # Wait for server to start
-            discovery.start_advertising(
-                port=31330,
-                model_name=MODEL_NAME,
-                device='mps'
-            )
+            try:
+                discovery.start_advertising(
+                    port=SERVER_PORT,
+                    model_name=MODEL_NAME,
+                    device='mps'
+                )
+                logger.info("Started advertising peer")
+            except Exception as e:
+                logger.error(f"Failed to start advertising: {e}")
         
         advertise_thread = threading.Thread(target=delayed_advertise)
         advertise_thread.start()
