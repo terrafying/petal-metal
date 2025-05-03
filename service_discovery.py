@@ -18,6 +18,7 @@ class PetalsServiceDiscovery:
     Particularly optimized for macOS but works cross-platform.
     """
     SERVICE_TYPE = "_petals._tcp.local."
+    HASH_FUNC = 0x12  # sha2-256 in multihash
     
     def __init__(self):
         self.zeroconf = Zeroconf()
@@ -30,31 +31,38 @@ class PetalsServiceDiscovery:
     def peer_id(self):
         """Generate or return a stable peer ID for this instance."""
         if self._peer_id is None:
-            # Create a stable peer ID based on machine-specific information
-            machine_id = self._get_machine_id()
-            
-            # Generate a hash that will be consistent for this machine
-            identity_hash = hashlib.sha256(machine_id.encode()).digest()
-            
-            # Create a proper libp2p peer ID:
-            # 1. Create a multihash (sha2-256 + digest)
-            mh = multihash.encode(identity_hash, 'sha2-256')
-            
-            # 2. Encode with base58btc (what libp2p expects)
-            self._peer_id = base58.b58encode(mh).decode()
-            
-            logger.debug(f"Generated peer ID: {self._peer_id}")
-            
-            # Validate the peer ID format
             try:
-                # Attempt to decode it - this will fail if format is wrong
-                decoded = base58.b58decode(self._peer_id)
-                mh_decoded = multihash.decode(decoded)
-                if mh_decoded['name'] != 'sha2-256':
-                    raise ValueError("Wrong hash algorithm")
+                # Create a stable peer ID based on machine-specific information
+                machine_id = self._get_machine_id()
+                
+                # Generate a hash that will be consistent for this machine
+                identity_hash = hashlib.sha256(machine_id.encode()).digest()
+                
+                # Create a proper libp2p peer ID:
+                # 1. Create a multihash (sha2-256 + digest)
+                # multihash format: <hash-func-code><digest-length><digest-value>
+                mh = bytes([self.HASH_FUNC]) + bytes([len(identity_hash)]) + identity_hash
+                
+                # 2. Encode with base58btc (what libp2p expects)
+                self._peer_id = base58.b58encode(mh).decode()
+                
+                logger.debug(f"Generated peer ID: {self._peer_id}")
+                
+                # Validate the peer ID format
+                try:
+                    # Attempt to decode it - this will fail if format is wrong
+                    decoded = base58.b58decode(self._peer_id)
+                    hash_func, _ = multihash.decode(decoded)
+                    if hash_func != self.HASH_FUNC:  # Check if it's sha2-256
+                        raise ValueError(f"Wrong hash algorithm: {hash_func}")
+                except Exception as e:
+                    logger.error(f"Validation failed for generated peer ID: {e}")
+                    self._peer_id = None
+                    raise RuntimeError("Failed to validate peer ID")
+                
             except Exception as e:
-                logger.error(f"Generated invalid peer ID: {e}")
-                raise RuntimeError("Failed to generate valid peer ID")
+                logger.error(f"Failed to generate peer ID: {e}")
+                raise RuntimeError(f"Failed to generate valid peer ID: {e}")
             
         return self._peer_id
     
@@ -174,7 +182,10 @@ class PetalsServiceDiscovery:
                 try:
                     # Validate the peer ID format
                     decoded = base58.b58decode(peer_id)
-                    multihash.decode(decoded)
+                    hash_func, _ = multihash.decode(decoded)
+                    if hash_func != self.HASH_FUNC:
+                        logger.warning(f"Invalid hash function in peer ID from service {service.name}")
+                        continue
                 except Exception as e:
                     logger.warning(f"Invalid peer ID format from service {service.name}: {e}")
                     continue
