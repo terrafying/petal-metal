@@ -7,6 +7,8 @@ import time
 import base58
 import hashlib
 import os
+import multihash
+import multibase
 
 logger = logging.getLogger(__name__)
 
@@ -30,10 +32,30 @@ class PetalsServiceDiscovery:
         if self._peer_id is None:
             # Create a stable peer ID based on machine-specific information
             machine_id = self._get_machine_id()
+            
             # Generate a hash that will be consistent for this machine
-            peer_hash = hashlib.sha256(machine_id.encode()).digest()[:32]
-            # Convert to base58 format which is what libp2p expects
-            self._peer_id = base58.b58encode(peer_hash).decode()
+            identity_hash = hashlib.sha256(machine_id.encode()).digest()
+            
+            # Create a proper libp2p peer ID:
+            # 1. Create a multihash (sha2-256 + digest)
+            mh = multihash.encode(identity_hash, 'sha2-256')
+            
+            # 2. Encode with base58btc (what libp2p expects)
+            self._peer_id = base58.b58encode(mh).decode()
+            
+            logger.debug(f"Generated peer ID: {self._peer_id}")
+            
+            # Validate the peer ID format
+            try:
+                # Attempt to decode it - this will fail if format is wrong
+                decoded = base58.b58decode(self._peer_id)
+                mh_decoded = multihash.decode(decoded)
+                if mh_decoded['name'] != 'sha2-256':
+                    raise ValueError("Wrong hash algorithm")
+            except Exception as e:
+                logger.error(f"Generated invalid peer ID: {e}")
+                raise RuntimeError("Failed to generate valid peer ID")
+            
         return self._peer_id
     
     def _get_machine_id(self) -> str:
@@ -78,6 +100,9 @@ class PetalsServiceDiscovery:
         # Get the local IP address
         local_ip = socket.gethostbyname(hostname)
         
+        # Generate peer ID before advertising
+        peer_id = self.peer_id  # This will raise an error if generation fails
+        
         info = ServiceInfo(
             type_=self.SERVICE_TYPE,
             name=f"{service_name}.{self.SERVICE_TYPE}",
@@ -86,15 +111,15 @@ class PetalsServiceDiscovery:
             properties={
                 'model': model_name,
                 'device': device,
-                'peer_id': self.peer_id,  # Include the peer ID in properties
-                'ip': local_ip  # Include the IP address explicitly
+                'peer_id': peer_id,
+                'ip': local_ip
             }
         )
         
         try:
             self.zeroconf.register_service(info)
             logger.info(f"Advertising Petals service on port {port} with model {model_name}")
-            logger.info(f"Service peer ID: {self.peer_id}")
+            logger.info(f"Service peer ID: {peer_id}")
         except Exception as e:
             logger.error(f"Failed to register service: {e}")
 
@@ -144,6 +169,14 @@ class PetalsServiceDiscovery:
                 
                 if not peer_id:
                     logger.warning(f"Service {service.name} doesn't have a peer ID, skipping")
+                    continue
+                
+                try:
+                    # Validate the peer ID format
+                    decoded = base58.b58decode(peer_id)
+                    multihash.decode(decoded)
+                except Exception as e:
+                    logger.warning(f"Invalid peer ID format from service {service.name}: {e}")
                     continue
                 
                 # Format the peer address in Petals format with proper peer ID

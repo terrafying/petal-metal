@@ -9,12 +9,14 @@ import time
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+MODEL_NAME = "bigscience/bloom-7b1-petals"
+
 def run_server(existing_peer=None):
     """Start the server either as new swarm or joining existing one."""
     cmd = [
         'python3', '-m', 'petals.cli.run_server',
         '--port', '31330',
-        '--converted_model_name_or_path', 'bigscience/bloom-7b1-petals',
+        '--converted_model_name_or_path', MODEL_NAME,
         '--device', 'mps',
         '--torch_dtype', 'float16'
     ]
@@ -67,7 +69,7 @@ def main():
         discovery = PetalsServiceDiscovery()
         
         # Check for existing swarm
-        existing_peer = detect_existing_swarm(discovery, 'bigscience/bloom-7b1-petals')
+        existing_peer = detect_existing_swarm(discovery, MODEL_NAME)
         
         # Start the server
         server_process = run_server(existing_peer)
@@ -77,7 +79,7 @@ def main():
             time.sleep(5)  # Wait for server to start
             discovery.start_advertising(
                 port=31330,
-                model_name='bigscience/bloom-7b1-petals',
+                model_name=MODEL_NAME,
                 device='mps'
             )
         

@@ -1,4 +1,6 @@
 petals
 zeroconf
 psutil
-base58 
+base58
+py-multibase
+py-multihash 
