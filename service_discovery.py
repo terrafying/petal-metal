@@ -4,6 +4,9 @@ import threading
 from zeroconf import ServiceBrowser, ServiceInfo, Zeroconf
 import logging
 import time
+import base58
+import hashlib
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +22,46 @@ class PetalsServiceDiscovery:
         self.browser = None
         self.services = {}
         self.lock = threading.Lock()
+        self._peer_id = None
+        
+    @property
+    def peer_id(self):
+        """Generate or return a stable peer ID for this instance."""
+        if self._peer_id is None:
+            # Create a stable peer ID based on machine-specific information
+            machine_id = self._get_machine_id()
+            # Generate a hash that will be consistent for this machine
+            peer_hash = hashlib.sha256(machine_id.encode()).digest()[:32]
+            # Convert to base58 format which is what libp2p expects
+            self._peer_id = base58.b58encode(peer_hash).decode()
+        return self._peer_id
+    
+    def _get_machine_id(self) -> str:
+        """Get a stable machine identifier."""
+        try:
+            # Try to use the system's machine ID first
+            if os.path.exists('/etc/machine-id'):
+                with open('/etc/machine-id', 'r') as f:
+                    return f.read().strip()
+            # Fallback to using hardware info on macOS
+            import subprocess
+            result = subprocess.run(['system_profiler', 'SPHardwareDataType'], 
+                                 capture_output=True, text=True)
+            # Extract serial number or hardware UUID
+            for line in result.stdout.split('\n'):
+                if 'Serial Number' in line or 'Hardware UUID' in line:
+                    return line.split(':')[1].strip()
+        except Exception as e:
+            logger.warning(f"Failed to get machine ID: {e}")
+        
+        # Final fallback: use hostname + MAC address if available
+        hostname = socket.gethostname()
+        try:
+            import uuid
+            mac = hex(uuid.getnode())[2:]
+        except:
+            mac = "000000000000"
+        return f"{hostname}-{mac}"
         
     def start_advertising(self, port: int, model_name: str, device: str = "mps") -> None:
         """
@@ -32,21 +75,26 @@ class PetalsServiceDiscovery:
         hostname = socket.gethostname()
         service_name = f"Petals-{hostname}-{port}"
         
+        # Get the local IP address
+        local_ip = socket.gethostbyname(hostname)
+        
         info = ServiceInfo(
             type_=self.SERVICE_TYPE,
             name=f"{service_name}.{self.SERVICE_TYPE}",
-            addresses=[socket.inet_aton(socket.gethostbyname(hostname))],
+            addresses=[socket.inet_aton(local_ip)],
             port=port,
             properties={
                 'model': model_name,
                 'device': device,
-                'hostname': hostname
+                'peer_id': self.peer_id,  # Include the peer ID in properties
+                'ip': local_ip  # Include the IP address explicitly
             }
         )
         
         try:
             self.zeroconf.register_service(info)
             logger.info(f"Advertising Petals service on port {port} with model {model_name}")
+            logger.info(f"Service peer ID: {self.peer_id}")
         except Exception as e:
             logger.error(f"Failed to register service: {e}")
 
@@ -89,13 +137,19 @@ class PetalsServiceDiscovery:
                 if model_name and properties.get(b'model', b'').decode() != model_name:
                     continue
                 
-                # Get the first IPv4 address
-                addr = socket.inet_ntoa(service.addresses[0])
+                # Get the IP address and peer ID from properties
+                addr = properties.get(b'ip', b'').decode() or socket.inet_ntoa(service.addresses[0])
+                peer_id = properties.get(b'peer_id', b'').decode()
                 port = service.port
                 
-                # Format the peer address in Petals format
-                peer = f"/ip4/{addr}/tcp/{port}/p2p/{properties.get(b'hostname', b'').decode()}"
+                if not peer_id:
+                    logger.warning(f"Service {service.name} doesn't have a peer ID, skipping")
+                    continue
+                
+                # Format the peer address in Petals format with proper peer ID
+                peer = f"/ip4/{addr}/tcp/{port}/p2p/{peer_id}"
                 peers.append(peer)
+                logger.debug(f"Found peer: {peer}")
         
         return peers
 
