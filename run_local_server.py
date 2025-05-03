@@ -5,15 +5,53 @@ import threading
 import signal
 import sys
 import logging
-
+import time
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def run_server():
+def run_server(existing_peer=None):
+    """Start the server either as new swarm or joining existing one."""
+    cmd = [
+        'python3', '-m', 'petals.cli.run_server',
+        '--port', '31330',
+        '--converted_model_name_or_path', 'bigscience/bloom-7b1-petals',
+        '--device', 'mps',
+        '--torch_dtype', 'float16'
+    ]
+    
+    if existing_peer:
+        # Join existing swarm
+        cmd.extend(['--initial_peers', existing_peer])
+        logger.info(f'Starting server to join existing peer: {existing_peer}')
+    else:
+        # Start new swarm
+        cmd.append('--new_swarm')
+        logger.info('Starting server as new swarm')
+    
+    return subprocess.Popen(cmd)
+
+def detect_existing_swarm(discovery, model_name, timeout=10):
+    """Check if there's an existing swarm on the local network."""
+    logger.info('Checking for existing swarm...')
+    discovery.start_discovery()
+    
+    # Wait briefly for peer discovery
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        peers = discovery.get_peers(model_name)
+        if peers:
+            logger.info(f'Found existing swarm peers: {peers}')
+            return peers[0]  # Return the first peer's address
+        time.sleep(1)
+    
+    logger.info('No existing swarm found')
+    return None
+
+def run_server_secondary_local():
     process = subprocess.Popen([
         'python3', '-m', 'petals.cli.run_server',
-        '--new_swarm',
-        '--port', '31330',
+        '--initial_peers', 'localhost:31330',
+        '--port', '31331',
         '--converted_model_name_or_path', 'bigscience/bloom-7b1-petals',
         '--device', 'mps',
         '--torch_dtype', 'float16'
@@ -27,14 +65,15 @@ def main():
         
         # Start service discovery
         discovery = PetalsServiceDiscovery()
-        discovery.start_discovery()
+        
+        # Check for existing swarm
+        existing_peer = detect_existing_swarm(discovery, 'bigscience/bloom-7b1-petals')
         
         # Start the server
-        server_process = run_server()
+        server_process = run_server(existing_peer)
         
         # Start advertising after a brief delay to ensure server is up
         def delayed_advertise():
-            import time
             time.sleep(5)  # Wait for server to start
             discovery.start_advertising(
                 port=31330,
