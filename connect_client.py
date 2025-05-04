@@ -4,11 +4,13 @@ import torch
 from transformers import AutoTokenizer
 from petals import AutoDistributedModelForCausalLM
 from unified_discovery import UnifiedDiscovery
+import traceback
 
 # Configure logging
 logging.basicConfig(
     format='%(asctime)s [%(levelname)s] %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    datefmt='%Y-%m-%d %H:%M:%S',
+    level=logging.DEBUG  # Set to DEBUG for more detailed logs
 )
 logger = logging.getLogger(__name__)
 
@@ -34,14 +36,17 @@ class PetalsClient:
         """
         try:
             # Start discovery
+            logger.debug("Starting peer discovery...")
             self.discovery.start_discovery()
             
             # Wait for peers if requested
             if wait_for_peers:
+                logger.debug(f"Waiting for peers (timeout: {timeout}s)...")
                 start_time = time.time()
                 while time.time() - start_time < timeout:
                     peers = self.discovery.get_peers()
                     if peers:
+                        logger.info(f"Found {len(peers)} peers: {peers}")
                         break
                     time.sleep(1)
             else:
@@ -51,21 +56,30 @@ class PetalsClient:
                 logger.info(f"Found peers: {peers}")
                 
                 # Initialize model and tokenizer
+                logger.debug(f"Initializing tokenizer for model: {self.model_name}")
                 self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-                self.model = AutoDistributedModelForCausalLM.from_pretrained(
-                    self.model_name,
-                    initial_peers=peers,
-                    torch_dtype=torch.float32,
-                    device_map={"": "mps"},
-                )
                 
-                return True
+                logger.debug("Initializing distributed model...")
+                try:
+                    self.model = AutoDistributedModelForCausalLM.from_pretrained(
+                        self.model_name,
+                        initial_peers=peers,
+                        torch_dtype=torch.float32,
+                        device_map={"": "mps"},
+                    )
+                    logger.info("Successfully initialized distributed model")
+                    return True
+                except Exception as model_error:
+                    logger.error(f"Failed to initialize model: {str(model_error)}")
+                    logger.debug(f"Model initialization error details:\n{traceback.format_exc()}")
+                    return False
             else:
-                logger.warning("No peers found")
+                logger.warning(f"No peers found after {timeout}s of waiting")
                 return False
                 
         except Exception as e:
-            logger.error(f"Error during connection: {e}")
+            logger.error(f"Error during connection: {str(e)}")
+            logger.debug(f"Connection error details:\n{traceback.format_exc()}")
             return False
     
     def generate(self, prompt: str, max_new_tokens: int = 20) -> str:

@@ -9,6 +9,10 @@ import os
 import subprocess
 from typing import Optional, List, Dict, Set
 import base58
+import requests
+from pathlib import Path
+import traceback
+import psutil
 
 # Configure logging
 logging.basicConfig(
@@ -20,9 +24,11 @@ logger = logging.getLogger(__name__)
 DISCOVERY_PORT = 31338
 BROADCAST_INTERVAL = 1.0  # seconds
 MDNS_SERVICE_TYPE = "_petals._tcp.local."
+GITHUB_API_URL = "https://api.github.com"
+PEERS_FILE = "known_peers.json"
 
 class UnifiedDiscovery:
-    """Unified peer discovery system combining UDP broadcast, mDNS/Bonjour, and UPnP."""
+    """Unified peer discovery system combining UDP broadcast, mDNS/Bonjour, UPnP, and git-based discovery."""
     
     def __init__(self):
         self.peers: Set[str] = set()  # Set of peer addresses
@@ -33,7 +39,32 @@ class UnifiedDiscovery:
         self._mdns_browser = None
         self._mdns_zeroconf = None
         self._upnp_client = None
+        self._known_peers_file = Path(PEERS_FILE)
+        self._load_known_peers()
         
+    def _load_known_peers(self):
+        """Load known peers from file."""
+        try:
+            if self._known_peers_file.exists():
+                with open(self._known_peers_file, 'r') as f:
+                    known_peers = json.load(f)
+                    with self.lock:
+                        self.peers.update(known_peers)
+                logger.info(f"Loaded {len(known_peers)} known peers from file")
+        except Exception as e:
+            logger.warning(f"Failed to load known peers: {e}")
+            
+    def _save_known_peers(self):
+        """Save known peers to file."""
+        try:
+            with self.lock:
+                known_peers = list(self.peers)
+            with open(self._known_peers_file, 'w') as f:
+                json.dump(known_peers, f)
+            logger.debug(f"Saved {len(known_peers)} known peers to file")
+        except Exception as e:
+            logger.warning(f"Failed to save known peers: {e}")
+    
     @property
     def peer_id(self) -> str:
         """Get or generate a stable peer ID."""
@@ -108,19 +139,37 @@ class UnifiedDiscovery:
     def _start_udp_discovery(self):
         """Start UDP broadcast discovery."""
         try:
+            logger.debug("Initializing UDP socket...")
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.sock.bind(('', DISCOVERY_PORT))
+            
+            try:
+                logger.debug(f"Binding UDP socket to port {DISCOVERY_PORT}...")
+                self.sock.bind(('', DISCOVERY_PORT))
+            except socket.error as bind_error:
+                logger.error(f"Failed to bind UDP socket: {str(bind_error)}")
+                logger.debug(f"Socket bind error details:\n{traceback.format_exc()}")
+                # Try to find what's using the port
+                try:
+                    for conn in psutil.net_connections():
+                        if conn.laddr.port == DISCOVERY_PORT:
+                            logger.error(f"Port {DISCOVERY_PORT} is in use by process {conn.pid}")
+                except Exception as e:
+                    logger.debug(f"Failed to check port usage: {e}")
+                raise
+            
             self.sock.settimeout(1.0)
             
             # Start listener thread
+            logger.debug("Starting UDP listener thread...")
             self.listen_thread = threading.Thread(target=self._listen_udp, daemon=True)
             self.listen_thread.start()
             logger.info("Started UDP discovery")
             
         except Exception as e:
-            logger.error(f"Failed to start UDP discovery: {e}")
+            logger.error(f"Failed to start UDP discovery: {str(e)}")
+            logger.debug(f"UDP discovery error details:\n{traceback.format_exc()}")
             
     def _start_mdns_discovery(self):
         """Start mDNS/Bonjour discovery if available."""
@@ -132,39 +181,56 @@ class UnifiedDiscovery:
                     self.discovery = discovery
                 
                 def add_service(self, zeroconf, type, name):
-                    info = zeroconf.get_service_info(type, name)
-                    if info:
-                        try:
-                            addr = info.properties.get(b'ip', b'').decode() or socket.inet_ntoa(info.addresses[0])
-                            port = info.port
-                            peer_id = info.properties.get(b'peer_id', b'').decode()
-                            
-                            if peer_id:
-                                peer_addr = f"/ip4/{addr}/tcp/{port}/p2p/{peer_id}"
-                                with self.discovery.lock:
-                                    self.discovery.peers.add(peer_addr)
-                                logger.debug(f"Found peer via mDNS: {peer_addr}")
-                        except Exception as e:
-                            logger.warning(f"Failed to process mDNS service: {e}")
+                    try:
+                        info = zeroconf.get_service_info(type, name)
+                        if info:
+                            try:
+                                addr = info.properties.get(b'ip', b'').decode() or socket.inet_ntoa(info.addresses[0])
+                                port = info.port
+                                peer_id = info.properties.get(b'peer_id', b'').decode()
+                                
+                                if peer_id:
+                                    peer_addr = f"/ip4/{addr}/tcp/{port}/p2p/{peer_id}"
+                                    with self.discovery.lock:
+                                        self.discovery.peers.add(peer_addr)
+                                    logger.debug(f"Found peer via mDNS: {peer_addr}")
+                                else:
+                                    logger.warning(f"Peer ID missing in mDNS service: {name}")
+                            except Exception as e:
+                                logger.warning(f"Failed to process mDNS service: {str(e)}")
+                                logger.debug(f"mDNS service processing error details:\n{traceback.format_exc()}")
+                    except Exception as e:
+                        logger.error(f"Error in mDNS add_service: {str(e)}")
+                        logger.debug(f"mDNS add_service error details:\n{traceback.format_exc()}")
                 
                 def remove_service(self, zeroconf, type, name):
                     """Handle service removal."""
                     try:
                         info = zeroconf.get_service_info(type, name)
                         if info:
-                            addr = info.properties.get(b'ip', b'').decode() or socket.inet_ntoa(info.addresses[0])
-                            port = info.port
-                            peer_id = info.properties.get(b'peer_id', b'').decode()
-                            
-                            if peer_id:
-                                peer_addr = f"/ip4/{addr}/tcp/{port}/p2p/{peer_id}"
-                                with self.discovery.lock:
-                                    if peer_addr in self.discovery.peers:
-                                        self.discovery.peers.remove(peer_addr)
-                                        logger.debug(f"Removed peer via mDNS: {peer_addr}")
+                            try:
+                                addr = info.properties.get(b'ip', b'').decode() or socket.inet_ntoa(info.addresses[0])
+                                port = info.port
+                                peer_id = info.properties.get(b'peer_id', b'').decode()
+                                
+                                if peer_id:
+                                    peer_addr = f"/ip4/{addr}/tcp/{port}/p2p/{peer_id}"
+                                    with self.discovery.lock:
+                                        if peer_addr in self.discovery.peers:
+                                            self.discovery.peers.remove(peer_addr)
+                                            logger.debug(f"Removed peer via mDNS: {peer_addr}")
+                            except Exception as e:
+                                logger.warning(f"Failed to process mDNS service removal: {str(e)}")
+                                logger.debug(f"mDNS service removal error details:\n{traceback.format_exc()}")
                     except Exception as e:
-                        logger.warning(f"Failed to process mDNS service removal: {e}")
+                        logger.error(f"Error in mDNS remove_service: {str(e)}")
+                        logger.debug(f"mDNS remove_service error details:\n{traceback.format_exc()}")
+                
+                def update_service(self, zeroconf, type, name):
+                    """Handle service updates."""
+                    logger.debug(f"mDNS service updated: {name}")
             
+            logger.debug("Initializing mDNS/Zeroconf...")
             self._mdns_zeroconf = Zeroconf()
             self._mdns_browser = ServiceBrowser(
                 self._mdns_zeroconf,
@@ -176,7 +242,8 @@ class UnifiedDiscovery:
         except ImportError:
             logger.info("mDNS discovery not available (zeroconf not installed)")
         except Exception as e:
-            logger.error(f"Failed to start mDNS discovery: {e}")
+            logger.error(f"Failed to start mDNS discovery: {str(e)}")
+            logger.debug(f"mDNS discovery error details:\n{traceback.format_exc()}")
             
     def _start_upnp_discovery(self):
         """Start UPnP discovery if available."""
@@ -229,8 +296,39 @@ class UnifiedDiscovery:
     def get_peers(self) -> List[str]:
         """Get list of discovered peer addresses."""
         with self.lock:
-            return list(self.peers)
+            peers = list(self.peers)
             
+        # If no peers found through real-time discovery, try git-based discovery
+        if not peers:
+            peers = self._discover_peers_from_git()
+            if peers:
+                with self.lock:
+                    self.peers.update(peers)
+                self._save_known_peers()
+                
+        return peers
+        
+    def _discover_peers_from_git(self) -> List[str]:
+        """Discover peers from git repository."""
+        try:
+            # Try to get peers from GitHub repository
+            repo_url = "https://github.com/bigscience-workshop/petals"
+            api_url = f"{GITHUB_API_URL}/repos/bigscience-workshop/petals/contents/known_peers.json"
+            
+            response = requests.get(api_url)
+            if response.status_code == 200:
+                content = response.json()
+                if 'content' in content:
+                    import base64
+                    peers_data = json.loads(base64.b64decode(content['content']).decode())
+                    logger.info(f"Found {len(peers_data)} peers from git repository")
+                    return peers_data
+                    
+        except Exception as e:
+            logger.warning(f"Failed to discover peers from git: {e}")
+            
+        return []
+    
     def start_advertising(self, port: int, model_name: str, device: str = "mps"):
         """Start advertising this peer using all available methods."""
         if not self.is_running:

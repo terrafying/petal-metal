@@ -3,4 +3,5 @@ zeroconf
 psutil>=5.9.0
 base58>=2.1.1
 py-multibase
-py-multihash 
+py-multihash
+requests>=2.31.0 

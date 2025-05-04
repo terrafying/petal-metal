@@ -24,12 +24,14 @@ MODEL_NAME = "bigscience/bloom-7b1-petals"
 SERVER_PORT = 31330
 
 def generate_peer_id() -> str:
-    """Generate a simple peer ID that doesn't rely on cid."""
+    """Generate a peer ID in the format expected by multiaddr."""
     # Generate a random UUID and hash it
     random_bytes = uuid.uuid4().bytes
     hash_bytes = hashlib.sha256(random_bytes).digest()
-    # Use base58 encoding for the final ID
-    return base58.b58encode(hash_bytes).decode()
+    # Format: <hash-func-code><digest-length><digest-value>
+    mh = bytes([0x12]) + bytes([len(hash_bytes)]) + hash_bytes
+    # Encode with base58btc
+    return base58.b58encode(mh).decode()
 
 def get_device_config():
     """Get device configuration based on available hardware."""

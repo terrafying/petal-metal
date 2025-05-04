@@ -23,7 +23,7 @@ cd petals-metal
 pip install -r requirements.txt
 
 # Start a server node - automatically joins existing swarm or creates new one
-./run_server.sh
+./run-local.sh
 ```
 
 The server will automatically:
@@ -52,13 +52,13 @@ finally:
 
 ## 🛠 Advanced Features
 
-### Automatic Service Discovery
-Our implementation uses mDNS/Bonjour for zero-config peer discovery and swarm management:
+### Unified Service Discovery
+Our implementation uses a unified discovery system that combines multiple discovery methods:
 ```python
-from service_discovery import PetalsServiceDiscovery
+from unified_discovery import UnifiedDiscovery
 
 # Start discovering peers
-discovery = PetalsServiceDiscovery()
+discovery = UnifiedDiscovery()
 discovery.start_discovery()
 
 # Get list of available peers
@@ -99,7 +99,7 @@ The system automatically monitors:
 
 The system uses smart network configuration:
 - Automatic port selection (default 31330)
-- mDNS/Bonjour for local network discovery
+- Unified discovery system combining multiple methods
 - Automatic swarm formation and joining
 - TCP for peer communication
 - File-based locking for process management
