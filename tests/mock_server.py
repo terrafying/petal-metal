@@ -1,66 +1,46 @@
-from __future__ import annotations
-
 import asyncio
-import contextlib
-import multiprocessing as mp
-import sys
-from enum import Enum
-from itertools import chain
-from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+import json
+import logging
+import threading
+import time
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
-from async_timeout import timeout
-from hivemind.utils.logging import get_logger
-from transformers import PreTrainedModel
+from transformers import AutoConfig, AutoModelForCausalLM
 
-from petals.data_structures import UID_DELIMITER, InferenceSession
-from petals.server.backend import TransformerBackend
-from petals.server.block_functions import iterate_rpc_inference, run_rpc_backward, run_rpc_forward
-from petals.server.task_prioritizer import DummyTaskPrioritizer, TaskPrioritizerBase
-from petals.utils.convert_block import QuantType
-from petals.server.config import ServerConfig
+logger = logging.getLogger(__name__)
 
-logger = get_logger(__name__)
-
-CACHE_TOKENS_AVAILABLE = "cache_tokens_available"
-
-class Event(Enum):
-    NEW_SESSION = 0
-    END_SESSION = 1
-    PUSH = 2
-    SHUTDOWN = 3
-
-@dataclass
-class RequestType:
-    """Request types for the server."""
-    FORWARD = "forward"
-    BACKWARD = "backward"
-    INFO = "info"
-
-@dataclass
-class ResponseStatus:
-    """Response status codes."""
-    OK = "ok"
-    ERROR = "error"
-
-class TransformerConnectionHandler:
-    """Handles connections for transformer blocks."""
+class MockServer:
+    """A mock server for testing."""
 
     def __init__(
         self,
-        config: ServerConfig,
-        module_backends: Dict[int, PreTrainedModel],
+        model_name_or_path: str,
+        block_indices: List[int],
+        host: str = "localhost",
+        port: int = 8000,
     ):
-        self.config = config
-        self.module_backends = module_backends
-        self.sessions: Dict[str, InferenceSession] = {}
-        self.num_connections = 0
-        self._lock = threading.Lock()
+        self.model_name_or_path = model_name_or_path
+        self.block_indices = block_indices
+        self.host = host
+        self.port = port
+
+        # Load model config
+        self.model_config = AutoConfig.from_pretrained(model_name_or_path)
+
+        # Load model blocks
+        self.model = AutoModelForCausalLM.from_pretrained(model_name_or_path)
+        self.blocks = {}
+        for block_idx in block_indices:
+            self.blocks[block_idx] = self.model.transformer.h[block_idx]
+
+        # Initialize server
+        self.server = None
         self._running = False
+        self._lock = threading.Lock()
 
     async def handle_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Handle a connection."""
-        self._running = True
         try:
             while self._running:
                 # Read request
@@ -95,11 +75,11 @@ class TransformerConnectionHandler:
         if not request_type:
             raise ValueError("Request type not specified")
 
-        if request_type == RequestType.FORWARD:
+        if request_type == "forward":
             return await self._handle_forward(request)
-        elif request_type == RequestType.BACKWARD:
+        elif request_type == "backward":
             return await self._handle_backward(request)
-        elif request_type == RequestType.INFO:
+        elif request_type == "info":
             return await self._handle_info(request)
         else:
             raise ValueError(f"Unknown request type: {request_type}")
@@ -107,7 +87,6 @@ class TransformerConnectionHandler:
     async def _handle_forward(self, request: dict) -> dict:
         """Handle a forward pass request."""
         # Get request parameters
-        session_id = request.get("session_id")
         block_indices = request.get("block_indices", [])
         hidden_states = request.get("hidden_states")
         attention_mask = request.get("attention_mask")
@@ -127,7 +106,7 @@ class TransformerConnectionHandler:
         outputs = hidden_states
         for block_idx in block_indices:
             # Get block
-            block = self.module_backends.get(block_idx)
+            block = self.blocks.get(block_idx)
             if block is None:
                 raise ValueError(f"Block {block_idx} not found")
 
@@ -142,14 +121,13 @@ class TransformerConnectionHandler:
             outputs = [o.tolist() if isinstance(o, torch.Tensor) else o for o in outputs]
 
         return {
-            "status": ResponseStatus.OK,
+            "status": "ok",
             "outputs": outputs,
         }
 
     async def _handle_backward(self, request: dict) -> dict:
         """Handle a backward pass request."""
         # Get request parameters
-        session_id = request.get("session_id")
         block_indices = request.get("block_indices", [])
         hidden_states = request.get("hidden_states")
         grad_outputs = request.get("grad_outputs")
@@ -173,7 +151,7 @@ class TransformerConnectionHandler:
         outputs = hidden_states
         for block_idx in reversed(block_indices):
             # Get block
-            block = self.module_backends.get(block_idx)
+            block = self.blocks.get(block_idx)
             if block is None:
                 raise ValueError(f"Block {block_idx} not found")
 
@@ -185,19 +163,17 @@ class TransformerConnectionHandler:
         grad_inputs = hidden_states.grad.tolist() if hidden_states.grad is not None else None
 
         return {
-            "status": ResponseStatus.OK,
+            "status": "ok",
             "grad_inputs": grad_inputs,
         }
 
     async def _handle_info(self, request: dict) -> dict:
         """Handle an info request."""
         return {
-            "status": ResponseStatus.OK,
+            "status": "ok",
             "info": {
-                "model_name": self.config.model_name_or_path,
-                "block_indices": self.config.block_indices,
-                "num_handlers": self.config.num_handlers,
-                "inference_max_length": self.config.inference_max_length,
+                "model_name": self.model_name_or_path,
+                "block_indices": self.block_indices,
             },
         }
 
@@ -213,21 +189,36 @@ class TransformerConnectionHandler:
     async def _send_error(self, writer: asyncio.StreamWriter, error: str):
         """Send an error response."""
         await self._send_response(writer, {
-            "status": ResponseStatus.ERROR,
+            "status": "error",
             "error": error,
         })
 
-    def update_metrics(self):
-        """Update server metrics."""
-        with self._lock:
-            # Update session metrics
-            current_time = time.time()
-            for session_id, session in list(self.sessions.items()):
-                if current_time - session.last_seen > self.config.session_timeout:
-                    del self.sessions[session_id]
+    async def start(self):
+        """Start the server."""
+        if self._running:
+            return
 
-    async def shutdown(self):
-        """Shutdown the handler."""
+        self._running = True
+        self.server = await asyncio.start_server(
+            self.handle_connection,
+            self.host,
+            self.port,
+        )
+
+        async with self.server:
+            await self.server.serve_forever()
+
+    def shutdown(self):
+        """Shutdown the server."""
         self._running = False
-        with self._lock:
-            self.sessions.clear()
+        if self.server is not None:
+            self.server.close()
+
+    def __enter__(self):
+        """Start the server."""
+        asyncio.run(self.start())
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Shutdown the server."""
+        self.shutdown() 

@@ -1,21 +1,16 @@
 [project]
-name = "petals-metal"
+name = "petal-2-metal"
 version = "0.1.0"
-description = "A distributed inference system for large language models"
-requires-python = ">=3.8"
-
-[tool.poetry.dependencies]
-python = "^3.8"
-torch = "^2.0.0"
-transformers = "^4.30.0"
-hivemind = "1.1.8"
-multiaddr = "0.0.9"
-cid = "0.3.0"
-base58 = "2.1.1"
-zeroconf = "0.115.0"
-miniupnpc = "2.1"
-libp2p = "0.2.0"
-
-[build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api" 
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "matplotlib>=3.10.1",
+    "numpy>=2.0.0",
+    "scipy>=1.12.0",
+    "scikit-learn>=1.4.0",
+    "seaborn>=0.13.0",
+    "torch>=2.2.0",
+    "transformers>=4.38.0",
+    "hf-xet>=1.1.0",
+]

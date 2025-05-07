@@ -16,7 +16,6 @@ import async_timeout
 import torch
 from hivemind.utils import TensorDescriptor, enter_asynchronously, get_logger
 
-from petals.data_structures import Handle
 from petals.utils.asyncio import shield_and_wait
 from petals.utils.misc import get_size_in_bytes
 
@@ -71,7 +70,7 @@ class MemoryCache:
     @contextlib.asynccontextmanager
     async def allocate_cache(
         self, *descriptors: TensorDescriptor, timeout: float
-    ) -> AsyncContextManager[Sequence[Handle]]:
+    ):
         """
         Create a handle that is associated with buffers on unique device. If cache full, raises AllocationFailed.
 

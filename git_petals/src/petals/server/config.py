@@ -1,20 +1,19 @@
 from dataclasses import dataclass
-from typing import List, Optional
-
-from petals.constants import DTYPE_MAP
+from typing import Dict, List, Optional
 
 @dataclass
-class DistributedConfig:
-    """Configuration for distributed model inference."""
+class ServerConfig:
+    """Configuration for a model server."""
 
     # Model configuration
     model_name_or_path: str
-    num_blocks: int
+    block_indices: List[int]
     torch_dtype: str = "float32"
     quant_type: str = "none"
 
     # Server configuration
-    initial_peers: List[str] = None
+    host: str = "localhost"
+    port: int = 8000
     num_handlers: int = 8
     inference_max_length: int = 2048
 
@@ -30,11 +29,8 @@ class DistributedConfig:
 
     def __post_init__(self):
         """Validate configuration after initialization."""
-        if self.initial_peers is None:
-            self.initial_peers = []
-
-        if self.num_blocks <= 0:
-            raise ValueError("num_blocks must be positive")
+        if not self.block_indices:
+            raise ValueError("block_indices must not be empty")
 
         if self.num_handlers <= 0:
             raise ValueError("num_handlers must be positive")
@@ -58,7 +54,4 @@ class DistributedConfig:
             raise ValueError("max_retries must be non-negative")
 
         if self.retry_delay <= 0:
-            raise ValueError("retry_delay must be positive")
-
-# For backward compatibility
-ClientConfig = DistributedConfig
+            raise ValueError("retry_delay must be positive") 

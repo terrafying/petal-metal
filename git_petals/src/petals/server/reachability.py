@@ -5,7 +5,7 @@ import time
 from concurrent.futures import Future
 from contextlib import asynccontextmanager
 from functools import partial
-from typing import Optional
+from typing import Dict, Optional, Set
 
 import requests
 from hivemind.dht import DHT, DHTNode
@@ -13,6 +13,7 @@ from hivemind.moe.client.remote_expert_worker import RemoteExpertWorker
 from hivemind.p2p import P2P, P2PContext, PeerID, ServicerBase
 from hivemind.proto import dht_pb2
 from hivemind.utils import get_logger
+import torch
 
 from petals.constants import REACHABILITY_API_URL
 
@@ -83,37 +84,27 @@ STRIPPED_PROBE_ARGS = dict(
 )
 
 
-class ReachabilityProtocol(ServicerBase):
-    """Mini protocol to test if a locally running peer is accessible by other devices in the swarm"""
+class ReachabilityProtocol:
+    """Protocol for checking server reachability."""
 
-    def __init__(self, *, probe: Optional[P2P] = None, wait_timeout: float = 5.0):
-        self.probe = probe
-        self.wait_timeout = wait_timeout
-        self._event_loop = self._stop = None
+    def __init__(self, *, initial_peers: Optional[Set[str]] = None):
+        self.initial_peers = initial_peers or set()
+        self.reachable_peers: Dict[str, float] = {}
 
-    async def call_check(self, remote_peer: PeerID, *, check_peer: PeerID) -> Optional[bool]:
-        """Returns True if remote_peer can reach check_peer, False if it cannot, None if it did not respond"""
-        try:
-            request = dht_pb2.PingRequest(peer=dht_pb2.NodeInfo(node_id=check_peer.to_bytes()))
-            timeout = self.wait_timeout if check_peer == remote_peer else self.wait_timeout * 2
-            response = await self.get_stub(self.probe, remote_peer).rpc_check(request, timeout=timeout)
-            logger.debug(f"call_check(remote_peer={remote_peer}, check_peer={check_peer}) -> {response.available}")
-            return response.available
-        except Exception as e:
-            logger.debug(f"Requested {remote_peer} to check {check_peer}, but got:", exc_info=True)
-            return None
+    def update_peer_reachability(self, peer_id: str, is_reachable: bool):
+        """Update the reachability status of a peer."""
+        if is_reachable:
+            self.reachable_peers[peer_id] = torch.cuda.current_time()
+        elif peer_id in self.reachable_peers:
+            del self.reachable_peers[peer_id]
 
-    async def rpc_check(self, request: dht_pb2.PingRequest, context: P2PContext) -> dht_pb2.PingResponse:
-        """Help another peer to check its reachability"""
-        response = dht_pb2.PingResponse(available=True)
-        check_peer = PeerID(request.peer.node_id)
-        if check_peer != context.local_id:  # remote peer wants us to check someone other than ourselves
-            response.available = await self.call_check(check_peer, check_peer=check_peer) is True
-            logger.info(
-                f"reachability.rpc_check(remote_peer=...{str(context.remote_id)[-6:]}, "
-                f"check_peer=...{str(check_peer)[-6:]}) -> {response.available}"
-            )
-        return response
+    def get_reachable_peers(self) -> Set[str]:
+        """Get the set of currently reachable peers."""
+        return set(self.reachable_peers.keys())
+
+    def shutdown(self):
+        """Shutdown the reachability protocol."""
+        self.reachable_peers.clear()
 
     @asynccontextmanager
     async def serve(self, p2p: P2P):

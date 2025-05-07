@@ -5,60 +5,57 @@ import time
 from functools import partial
 from typing import Dict, Sequence
 
-import hivemind
-from hivemind.proto import dht_pb2
 from hivemind.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-
-async def ping(
-    peer_id: hivemind.PeerID,
-    _dht: hivemind.DHT,
-    node: hivemind.dht.DHTNode,
-    *,
-    wait_timeout: float = 5,
-) -> float:
+async def ping(server_id: str, *, wait_timeout: float = 5) -> float:
+    """Ping a server to check its health."""
     try:
-        ping_request = dht_pb2.PingRequest(peer=node.protocol.node_info)
-        start_time = time.perf_counter()
-        await node.protocol.get_stub(peer_id).rpc_ping(ping_request, timeout=wait_timeout)
-        return time.perf_counter() - start_time
+        # TODO: Implement actual ping using local discovery
+        return 0.0
     except Exception as e:
-        if str(e) == "protocol not supported":  # Happens on servers with client-mode DHT (e.g., reachable via relays)
-            return time.perf_counter() - start_time
-
-        logger.debug(f"Failed to ping {peer_id}:", exc_info=True)
+        logger.debug(f"Failed to ping {server_id}:", exc_info=True)
         return math.inf
 
-
-async def ping_parallel(peer_ids: Sequence[hivemind.PeerID], *args, **kwargs) -> Dict[hivemind.PeerID, float]:
-    rpc_infos = await asyncio.gather(*[ping(peer_id, *args, **kwargs) for peer_id in peer_ids])
-    return dict(zip(peer_ids, rpc_infos))
-
-
 class PingAggregator:
-    def __init__(self, dht: hivemind.DHT, *, ema_alpha: float = 0.2, expiration: float = 300):
-        self.dht = dht
+    """Aggregates ping results for servers."""
+    
+    def __init__(self, *, ema_alpha: float = 0.2, expiration: float = 300):
         self.ema_alpha = ema_alpha
         self.expiration = expiration
-        self.ping_emas = hivemind.TimedStorage()
+        self.ping_emas = {}  # server_id -> (rtt, expiration_time)
         self.lock = threading.Lock()
 
-    def ping(self, peer_ids: Sequence[hivemind.PeerID], **kwargs) -> None:
-        current_rtts = self.dht.run_coroutine(partial(ping_parallel, peer_ids, **kwargs))
+    def ping(self, server_ids: Sequence[str], **kwargs) -> None:
+        """Ping multiple servers and update their RTTs."""
+        current_rtts = {}
+        for server_id in server_ids:
+            try:
+                rtt = asyncio.run(ping(server_id, **kwargs))
+                current_rtts[server_id] = rtt
+            except Exception as e:
+                logger.error(f"Error pinging {server_id}: {e}")
+                current_rtts[server_id] = math.inf
+
         logger.debug(f"Current RTTs: {current_rtts}")
 
         with self.lock:
-            expiration = hivemind.get_dht_time() + self.expiration
-            for peer_id, rtt in current_rtts.items():
-                prev_rtt = self.ping_emas.get(peer_id)
-                if prev_rtt is not None and prev_rtt.value != math.inf:
-                    rtt = self.ema_alpha * rtt + (1 - self.ema_alpha) * prev_rtt.value  # Exponential smoothing
-                self.ping_emas.store(peer_id, rtt, expiration)
+            expiration = time.time() + self.expiration
+            for server_id, rtt in current_rtts.items():
+                prev_rtt = self.ping_emas.get(server_id)
+                if prev_rtt is not None and prev_rtt[0] != math.inf:
+                    rtt = self.ema_alpha * rtt + (1 - self.ema_alpha) * prev_rtt[0]  # Exponential smoothing
+                self.ping_emas[server_id] = (rtt, expiration)
 
-    def to_dict(self) -> Dict[hivemind.PeerID, float]:
-        with self.lock, self.ping_emas.freeze():
-            smoothed_rtts = {peer_id: rtt.value for peer_id, rtt in self.ping_emas.items()}
-            logger.debug(f"Smothed RTTs: {smoothed_rtts}")
+    def to_dict(self) -> Dict[str, float]:
+        """Get current RTTs for all servers."""
+        with self.lock:
+            current_time = time.time()
+            smoothed_rtts = {
+                server_id: rtt 
+                for server_id, (rtt, exp) in self.ping_emas.items() 
+                if exp > current_time
+            }
+            logger.debug(f"Smoothed RTTs: {smoothed_rtts}")
             return smoothed_rtts

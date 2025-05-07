@@ -1,7 +1,3 @@
-petals
-zeroconf
-psutil>=5.9.0
-base58>=2.1.1
-py-multibase
-py-multihash
-requests>=2.31.0 
+torch>=2.0.0
+transformers>=4.30.0
+numpy>=1.24.0 
