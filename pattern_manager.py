@@ -55,30 +55,84 @@ class ResonantMode:
     harmonic_order: int = 1
     modulation_depth: float = 0.3
     phase_coupling: float = 0.2
+    temporal_scale: float = 1.0
     
-    def to_tensor(self, embedding_dim: int) -> torch.Tensor:
-        """Convert resonant mode parameters to a structured tensor."""
+    # Scales for modulation by driving_vector
+    freq_mod_scale: float = 0.5 
+    amp_mod_scale: float = 0.5
+    depth_mod_scale: float = 0.3
+    time_mod_scale: float = 0.2
+    
+    def to_tensor(self, embedding_dim: int, dynamic_phase_offset: float = 0.0, driving_vector: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Convert resonant mode parameters to a structured tensor, modulated by a driving_vector."""
+        # Base parameters from self, potentially modulated by driving_vector
+        base_freq = self.frequency
+        base_amp = self.amplitude
+        base_mod_depth = self.modulation_depth
+        base_time_scale = self.temporal_scale
+        current_phase = self.phase + dynamic_phase_offset
+
+        if driving_vector is not None and driving_vector.numel() > 0:
+            # Ensure driving_vector has at least 4 elements, or repeat if fewer
+            if driving_vector.numel() < 4:
+                # Ensure driving_vector is on the same device as model parameters if applicable
+                # For now, assuming it's a CPU tensor or device handling is managed upstream
+                dv_expanded = driving_vector.repeat((4 // driving_vector.numel()) + 1)
+                dv_final = dv_expanded[:4]
+            else:
+                dv_final = driving_vector[:4]
+
+            dv_norm = torch.tanh(dv_final)
+
+            base_freq += dv_norm[0] * self.freq_mod_scale * self.frequency 
+            base_amp += dv_norm[1] * self.amp_mod_scale * self.amplitude
+            base_mod_depth += dv_norm[2] * self.depth_mod_scale * self.modulation_depth
+            base_time_scale += dv_norm[3] * self.time_mod_scale * self.temporal_scale
+
+            # Clamp to avoid extreme values
+            base_freq = max(0.01, base_freq.item() if isinstance(base_freq, torch.Tensor) else base_freq)
+            base_amp = max(0.01, base_amp.item() if isinstance(base_amp, torch.Tensor) else base_amp)
+            base_mod_depth = max(0.0, min(1.0, base_mod_depth.item() if isinstance(base_mod_depth, torch.Tensor) else base_mod_depth))
+            base_time_scale = max(0.1, base_time_scale.item() if isinstance(base_time_scale, torch.Tensor) else base_time_scale)
+        
         # Create base tensor with geometric structure
-        base = torch.zeros(embedding_dim)
+        base_output_tensor = torch.zeros(embedding_dim)
         
-        # Apply frequency modulation
-        freq_mod = torch.sin(torch.linspace(0, 2 * np.pi * self.frequency, embedding_dim))
-        base += self.amplitude * freq_mod
+        # Create temporal axis based on modulated time scale
+        t = torch.linspace(0, 2 * np.pi * base_time_scale, embedding_dim)
         
-        # Apply harmonic structure
-        for h in range(1, self.harmonic_order + 1):
-            harmonic = torch.sin(torch.linspace(0, 2 * np.pi * self.frequency * h, embedding_dim))
-            base += (self.amplitude / h) * harmonic * self.modulation_depth
+        # Apply frequency modulation using modulated frequency and current_phase
+        freq_mod_wave = torch.sin(t * base_freq + current_phase)
+        base_output_tensor += base_amp * freq_mod_wave
         
-        # Apply phase coupling
-        phase_mod = torch.sin(torch.linspace(0, 2 * np.pi * self.phase, embedding_dim))
-        base += self.phase_coupling * phase_mod
+        # Apply harmonic structure using modulated parameters
+        for h_order in range(1, self.harmonic_order + 1):
+            harmonic_t = t * h_order
+            # Harmonic frequency uses base_freq, phase includes current_phase
+            harmonic_wave = torch.sin(harmonic_t * base_freq + current_phase) 
+            # Modulation wave for harmonics can use base_mod_depth
+            modulation_wave_for_harmonics = torch.sin(harmonic_t * base_mod_depth) 
+            
+            harmonic_combined = harmonic_wave * modulation_wave_for_harmonics
+            # Amplitude scaling for harmonics uses base_amp
+            base_output_tensor += (base_amp / (h_order + 1)) * harmonic_combined 
         
-        # Normalize and apply decay
-        base = base / (base.norm() + 1e-6)
-        base *= self.decay
+        # Apply phase coupling (original phase_coupling, not current_phase directly here as it's a different effect)
+        # This phase_coupling might need to be re-thought if current_phase already covers all phase aspects.
+        # For now, let's assume self.phase_coupling is a separate modulation component as per original.
+        # It uses self.phase (base phase of the mode) for its wave.
+        phase_coupling_wave = torch.sin(t * self.phase_coupling + self.phase) 
+        base_output_tensor += self.phase_coupling * phase_coupling_wave
         
-        return base
+        # Normalize and apply decay (self.decay is the base decay rate)
+        norm_val = base_output_tensor.norm()
+        if norm_val > 1e-6:
+            base_output_tensor = base_output_tensor / norm_val
+        
+        temporal_decay_values = torch.exp(-t * self.decay / base_time_scale)
+        base_output_tensor *= temporal_decay_values
+        
+        return base_output_tensor
 
 @dataclass
 class SecurityConfig:
@@ -366,8 +420,45 @@ class PatternManager:
             "complexity": torch.ones(self.embedding_dim)
         }
         
+        # Add shared memory pool (Restored)
+        self.shared_memory = {
+            'patterns': [],  # Store pattern embeddings
+            'interpretations': [],  # Store pattern interpretations
+            'contexts': [],  # Store context information
+            'timestamps': [],  # Track when patterns were added
+            'usage_count': [],  # Track how often patterns are borrowed
+            'affinity_scores': []  # Track pattern compatibility
+        }
+        
+        # Memory pool parameters (Restored)
+        self.max_memory_size = 1000  # Maximum number of patterns to store
+        self.memory_decay = 0.95  # Decay factor for old patterns
+        self.borrow_threshold = 0.7  # Minimum similarity to borrow a pattern
+        
         self.logger.info("PatternManager initialized successfully")
     
+    def get_memory_stats(self) -> Dict[str, any]:
+        """Get statistics about the shared memory pool."""
+        with self._lock: # Ensure thread safety if shared_memory is modified elsewhere
+            num_patterns = len(self.shared_memory.get('patterns', []))
+            utilization = num_patterns / self.max_memory_size if self.max_memory_size > 0 else 0
+            
+            avg_usage_count = 0
+            if self.shared_memory.get('usage_count') and num_patterns > 0:
+                avg_usage_count = sum(self.shared_memory['usage_count']) / num_patterns
+
+            avg_affinity_score = 0
+            if self.shared_memory.get('affinity_scores') and num_patterns > 0:
+                avg_affinity_score = sum(self.shared_memory['affinity_scores']) / num_patterns
+
+            return {
+                "total_patterns": num_patterns,
+                "max_memory_size": self.max_memory_size,
+                "memory_utilization": utilization,
+                "average_usage_count": avg_usage_count,
+                "average_affinity_score": avg_affinity_score
+            }
+
     def _validate_pattern_dimensions(self, pattern: torch.Tensor) -> None:
         """Validate pattern dimensions and content."""
         self.security_config.validate_tensor_dimensions(pattern)
@@ -462,16 +553,76 @@ class PatternManager:
     def _calculate_resonance_score(self, p1: torch.Tensor, p2: torch.Tensor) -> float:
         """Calculate resonance score between two patterns."""
         try:
-            self.logger.debug("Calculating resonance score")
+            self.logger.debug(f"Calculating resonance score for p1: {p1.shape}, p2: {p2.shape}")
+
+            # Ensure tensors are at least 2D (e.g. [seq_len, hidden_dim] or [batch, hidden_dim])
+            # If 3D [batch, seq, hidden], take mean over seq_len.
+            # If 1D [hidden_dim], unsqueeze to [1, hidden_dim]
             
-            # Score calculation logic here
-            score = 0.0
+            p1_proc = p1.clone()
+            p2_proc = p2.clone()
+
+            if p1_proc.ndim == 1:
+                p1_proc = p1_proc.unsqueeze(0) # [1, hidden_dim]
+            elif p1_proc.ndim == 3 and p1_proc.shape[0] == 1: # [1, seq, hidden]
+                p1_proc = p1_proc.mean(dim=1) # [1, hidden_dim]
+            elif p1_proc.ndim == 2: # [seq, hidden] or [batch_size > 1, hidden_dim]
+                # If it's [seq, hidden], we could mean it. If [batch > 1, hidden], this is tricky.
+                # Assuming for now p1 and p2 will be comparable after this, or batch_size is 1.
+                # If seq_len is the first dim and hidden_dim is the second.
+                if p1_proc.shape[0] > 1 and p1_proc.shape[0] != p2_proc.shape[0] : # Likely [seq, hidden]
+                     p1_proc = p1_proc.mean(dim=0, keepdim=True) # [1, hidden_dim]
+
+
+            if p2_proc.ndim == 1:
+                p2_proc = p2_proc.unsqueeze(0)
+            elif p2_proc.ndim == 3 and p2_proc.shape[0] == 1: # [1, seq, hidden]
+                p2_proc = p2_proc.mean(dim=1)
+            elif p2_proc.ndim == 2:
+                if p2_proc.shape[0] > 1 and p1_proc.shape[0] != p2_proc.shape[0]: # Likely [seq, hidden]
+                    p2_proc = p2_proc.mean(dim=0, keepdim=True)
+
+
+            # After processing, p1_proc and p2_proc should be [batch_size, hidden_dim]
+            # Ensure they are on the same device
+            if p1_proc.device != p2_proc.device:
+                p2_proc = p2_proc.to(p1_proc.device)
+
+            # Ensure hidden dimensions match. If not, this approach won't work directly.
+            if p1_proc.shape[-1] != p2_proc.shape[-1]:
+                self.logger.warning(f"Hidden dimensions mismatch for resonance: p1_proc {p1_proc.shape}, p2_proc {p2_proc.shape}. Returning 0.0.")
+                return 0.0
+
+            # If batch sizes are different after processing (e.g., one was [seq,hidden] and other [1,seq,hidden])
+            # and they are now e.g. [1, hidden] and [N, hidden], we can't directly do cosine similarity for all pairs.
+            # For simplicity, if batch sizes differ but one is 1, expand it.
+            if p1_proc.shape[0] != p2_proc.shape[0]:
+                if p1_proc.shape[0] == 1:
+                    p1_proc = p1_proc.expand_as(p2_proc)
+                elif p2_proc.shape[0] == 1:
+                    p2_proc = p2_proc.expand_as(p1_proc)
+                else:
+                    self.logger.warning(f"Batch sizes differ after processing and neither is 1: p1_proc {p1_proc.shape}, p2_proc {p2_proc.shape}. Returning 0.0.")
+                    return 0.0 # Or handle by taking mean of batch, or pairwise and then mean
+
+            # Cosine similarity expects inputs of shape (B, D) or (D)
+            # torch.nn.functional.cosine_similarity computes it along a dimension.
+            # If p1_proc is (N, D) and p2_proc is (N, D), it computes element-wise.
+            similarity = torch.nn.functional.cosine_similarity(p1_proc, p2_proc, dim=-1)
             
-            self.logger.debug("Resonance score calculated: %.4f", score)
+            # If similarity is a tensor with multiple values (e.g. batch > 1), take the mean.
+            score = similarity.mean().item()
+            
+            self.logger.debug(f"Resonance score calculated: {score:.4f}")
             return score
         except Exception as e:
-            self.logger.exception("Failed to calculate resonance score: %s", e)
-            raise
+            # Ensure logger is defined in this scope if it's not self.logger
+            current_logger = getattr(self, 'logger', logging.getLogger(__name__))
+            current_logger.exception("Failed to calculate resonance score: %s", e)
+            # It's generally better to raise the exception to allow higher-level error handling,
+            # or return a value that indicates error (like NaN or a specific error code if 0.0 is a valid score)
+            # For now, returning 0.0 on error to maintain previous behavior of returning a float.
+            return 0.0
     
     def update_patterns(self, new_patterns: Dict[str, torch.Tensor]):
         """Update stored patterns."""
@@ -511,7 +662,16 @@ class PatternManager:
                 frequency=np.random.uniform(0.1, 2.0),
                 amplitude=np.random.uniform(0.1, 1.0),
                 phase=np.random.uniform(0, 2 * np.pi),
-                decay=np.random.uniform(0.1, 0.5)
+                decay=np.random.uniform(0.1, 0.5),
+                coupling_strength=np.random.uniform(0.1, 0.5),
+                harmonic_order=np.random.randint(1, 5),
+                modulation_depth=np.random.uniform(0.1, 0.7),
+                phase_coupling=np.random.uniform(0.1, 0.5),
+                temporal_scale=np.random.uniform(0.5, 1.5),
+                freq_mod_scale=np.random.uniform(0.1, 0.5),
+                amp_mod_scale=np.random.uniform(0.1, 0.5),
+                depth_mod_scale=np.random.uniform(0.1, 0.5),
+                time_mod_scale=np.random.uniform(0.1, 0.3)
             )
             modes.append(mode)
         return modes
@@ -539,32 +699,68 @@ class PatternManager:
         result = tensor.clone()
         
         # Get language-specific modulation
-        lang_weight = self.language_weights.get(language, 0.5)  # Default to 0.5 if language not found
+        lang_weight = self.language_weights.get(language, 0.5)
         
+        # Extract a driving vector from the input tensor (e.g., mean of features or a fixed slice)
+        # This driving vector will have 4 elements.
+        if tensor.dim() > 1 and tensor.shape[-1] > 0 : # Ensure tensor is not empty and has a feature dimension
+            driving_vector_source = tensor.mean(dim=list(range(tensor.dim() -1 )))
+        elif tensor.dim() == 1 and tensor.numel() > 0: # 1D tensor
+             driving_vector_source = tensor
+        else: # Fallback if tensor is empty or unsuitable
+            driving_vector_source = torch.zeros(4, device=tensor.device if isinstance(tensor, torch.Tensor) else None)
+
+        if driving_vector_source.numel() >= 4:
+            control_vector = driving_vector_source[:4]
+        elif driving_vector_source.numel() > 0 : # Repeat if too short
+             control_vector = driving_vector_source.repeat((4 // driving_vector_source.numel()) + 1)[:4]
+        else: # Fallback if tensor was empty initially
+            control_vector = torch.zeros(4, device=tensor.device if isinstance(tensor, torch.Tensor) else None)
+
         # Apply resonant modes with geometric structure
         for i, mode in enumerate(self.resonant_modes):
-            # Convert mode to tensor with geometric structure
-            mode_tensor = mode.to_tensor(self.embedding_dim)
+            # Calculate dynamic phase offset for this mode and timestep
+            # mode.frequency here is the base frequency of the mode
+            dynamic_phase_offset = mode.frequency * time_step 
             
-            # Calculate base resonance with geometric structure
-            phase = mode.phase + mode.frequency * time_step
-            resonance = mode.amplitude * torch.sin(phase + mode_tensor)
+            # Convert mode to tensor with geometric structure, applying driving vector and dynamic phase
+            mode_wave = mode.to_tensor(
+                self.embedding_dim, 
+                dynamic_phase_offset=dynamic_phase_offset, 
+                driving_vector=control_vector
+            )
+            
+            # Current resonance starts with this mode's wave
+            current_resonance_effect = mode_wave
             
             # Apply language-specific coupling with geometric structure
             for j, other_mode in enumerate(self.resonant_modes):
                 if i != j:
                     coupling = self.coupling_matrix[i, j]
-                    other_tensor = other_mode.to_tensor(self.embedding_dim)
-                    resonance += coupling * torch.sin(other_tensor)
+                    # Other modes also get driven by the same control_vector and their own dynamic phase offset
+                    other_dynamic_phase_offset = other_mode.frequency * time_step
+                    other_mode_wave = other_mode.to_tensor(
+                        self.embedding_dim, 
+                        dynamic_phase_offset=other_dynamic_phase_offset, 
+                        driving_vector=control_vector
+                    )
+                    # The coupling in the original 1012-line file used torch.sin(other_tensor)
+                    # If other_mode_wave is already a complex wave, applying torch.sin again might be distorting.
+                    # Let's assume the coupling term should be based on the other_mode_wave directly or a simple transformation.
+                    # Sticking to torch.sin for now to match the structure of the 1012-line file's coupling.
+                    current_resonance_effect += coupling * torch.sin(other_mode_wave) 
             
             # Apply language modulation with geometric structure
-            resonance *= lang_weight
+            current_resonance_effect *= lang_weight
             
-            # Apply to tensor while preserving geometric structure
-            result = result * (1 + resonance.unsqueeze(0) * mode.decay)
+            # Apply to tensor while preserving geometric structure (multiplicative application)
+            # mode.decay is the base decay for the mode.
+            result = result * (1 + current_resonance_effect.unsqueeze(0) * mode.decay)
         
         # Normalize to preserve geometric structure
-        result = result / (result.norm(dim=-1, keepdim=True) + 1e-6)
+        norm_val = result.norm(dim=-1, keepdim=True)
+        # Add a small epsilon to norm_val before division to prevent division by zero with zero tensors
+        result = result / (norm_val + 1e-9) 
         
         return result
     

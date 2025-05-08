@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pattern Explorer</title>
+    
+    <!-- Framework Dependencies -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.12.0/dist/tf.min.js"></script>
+    
+    <!-- Custom Styles -->
+    <style>
+        :root {
+            --primary-color: #2c3e50;
+            --secondary-color: #34495e;
+            --accent-color: #3498db;
+            --text-color: #ecf0f1;
+            --background-color: #1a1a1a;
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--background-color);
+            color: var(--text-color);
+            line-height: 1.6;
+        }
+        
+        #app {
+            position: relative;
+            min-height: 100vh;
+            padding: 2rem;
+        }
+        
+        .controls {
+            position: fixed;
+            top: 1rem;
+            right: 1rem;
+            z-index: 100;
+            background-color: var(--primary-color);
+            padding: 1rem;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        
+        .control-group {
+            margin-bottom: 1rem;
+        }
+        
+        .control-group:last-child {
+            margin-bottom: 0;
+        }
+        
+        .control-group button {
+            background-color: var(--secondary-color);
+            color: var(--text-color);
+            border: none;
+            padding: 0.5rem 1rem;
+            margin: 0 0.25rem;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.3s ease;
+        }
+        
+        .control-group button:hover {
+            background-color: var(--accent-color);
+        }
+        
+        .container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+            padding: 2rem;
+        }
+        
+        .pattern-card {
+            background-color: var(--primary-color);
+            border-radius: 8px;
+            padding: 1rem;
+            cursor: pointer;
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+        
+        .pattern-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 6px 12px rgba(0, 0, 0, 0.2);
+        }
+        
+        .pattern-card.expanded {
+            grid-column: 1 / -1;
+        }
+        
+        .pattern-content {
+            font-family: monospace;
+            white-space: pre;
+            overflow-x: auto;
+            transform: scale(var(--zoom-level, 1));
+            transform-origin: top left;
+            transition: transform 0.3s ease;
+        }
+        
+        .pattern-info {
+            margin-top: 1rem;
+            font-size: 0.9rem;
+            opacity: 0.8;
+        }
+        
+        .pattern-stats {
+            margin-top: 0.5rem;
+            font-size: 0.8rem;
+        }
+        
+        .lattice-grid {
+            margin-top: 1rem;
+            display: grid;
+            gap: 2px;
+        }
+        
+        .lattice-row {
+            display: flex;
+            gap: 2px;
+        }
+        
+        .lattice-cell {
+            width: 10px;
+            height: 10px;
+            background-color: var(--secondary-color);
+            border-radius: 2px;
+        }
+        
+        .lattice-cell.active {
+            background-color: var(--accent-color);
+        }
+        
+        #comparisonView {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.9);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+        
+        #comparisonView.active {
+            display: flex;
+        }
+        
+        .comparison-container {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 2rem;
+            padding: 2rem;
+            max-width: 1200px;
+            width: 100%;
+        }
+        
+        .comparison-card {
+            background-color: var(--primary-color);
+            border-radius: 8px;
+            padding: 1rem;
+        }
+        
+        @media (max-width: 768px) {
+            .container {
+                grid-template-columns: 1fr;
+            }
+            
+            .controls {
+                position: static;
+                margin-bottom: 2rem;
+            }
+            
+            .comparison-container {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <div class="controls">
+            <div class="control-group">
+                <button>Mandala</button>
+                <button>Concretion</button>
+                <button>Both</button>
+            </div>
+            <div class="control-group zoom-controls">
+                <button>-</button>
+                <button>+</button>
+            </div>
+            <div class="control-group rotation-controls">
+                <button>←</button>
+                <button>→</button>
+            </div>
+        </div>
+        
+        <div class="container">
+            <!-- Pattern cards will be dynamically inserted here -->
+        </div>
+        
+        <div id="comparisonView">
+            <div class="comparison-container">
+                <div id="comparisonCard1" class="comparison-card"></div>
+                <div id="comparisonCard2" class="comparison-card"></div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Custom Scripts -->
+    <script src="app.js"></script>
+</body>
+</html> 
