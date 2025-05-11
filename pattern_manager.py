@@ -12,6 +12,10 @@ import asyncio
 import traceback
 from logging_utils import get_logger
 
+# Define a TRACE log level if it doesn't exist (often it doesn't by default)
+TRACE_LEVEL_NUM = 5 
+logging.addLevelName(TRACE_LEVEL_NUM, "TRACE")
+
 logger = get_logger(__name__)
 
 def log_error_with_traceback(logger, error: Exception, context: str = ""):
@@ -538,13 +542,13 @@ class PatternManager:
     def compute_resonance(self, pattern1: torch.Tensor, pattern2: torch.Tensor) -> float:
         """Compute resonance between two patterns."""
         try:
-            self.logger.debug("Computing resonance between patterns of shapes %s and %s", 
+            self.logger.log(TRACE_LEVEL_NUM, "Computing resonance between patterns of shapes %s and %s", 
                             pattern1.shape, pattern2.shape)
             
             # Resonance computation logic here
             resonance = self._calculate_resonance_score(pattern1, pattern2)
             
-            self.logger.debug("Resonance computed: %.4f", resonance)
+            self.logger.log(TRACE_LEVEL_NUM, "Resonance computed: %.4f", resonance)
             return resonance
         except Exception as e:
             self.logger.exception("Failed to compute resonance: %s", e)
@@ -553,7 +557,7 @@ class PatternManager:
     def _calculate_resonance_score(self, p1: torch.Tensor, p2: torch.Tensor) -> float:
         """Calculate resonance score between two patterns."""
         try:
-            self.logger.debug(f"Calculating resonance score for p1: {p1.shape}, p2: {p2.shape}")
+            self.logger.log(TRACE_LEVEL_NUM, f"Calculating resonance score for p1: {p1.shape}, p2: {p2.shape}")
 
             # Ensure tensors are at least 2D (e.g. [seq_len, hidden_dim] or [batch, hidden_dim])
             # If 3D [batch, seq, hidden], take mean over seq_len.
@@ -613,7 +617,7 @@ class PatternManager:
             # If similarity is a tensor with multiple values (e.g. batch > 1), take the mean.
             score = similarity.mean().item()
             
-            self.logger.debug(f"Resonance score calculated: {score:.4f}")
+            self.logger.log(TRACE_LEVEL_NUM, f"Resonance score calculated: {score:.4f}")
             return score
         except Exception as e:
             # Ensure logger is defined in this scope if it's not self.logger

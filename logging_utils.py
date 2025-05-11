@@ -73,6 +73,9 @@ class TraceableLogger:
     def critical(self, msg: str, *args, **kwargs):
         self._log(logging.CRITICAL, msg, *args, **kwargs)
     
+    def log(self, level: int, msg: str, *args, **kwargs):
+        self._log(level, msg, *args, **kwargs)
+    
     def exception(self, msg: str, *args, **kwargs):
         """Log an exception with full traceback."""
         kwargs['exc_info'] = True

@@ -1,6 +1,6 @@
 # Enhanced Petals for Apple Silicon
 
-This repository extends the [Petals](https://github.com/bigscience-workshop/petals) distributed system with optimizations for Apple Silicon and improved local network discovery. Run large language models like BLOOM-176B and Llama across multiple Apple Silicon machines efficiently.
+This repository extends the [Petals](https://github.com/bigscience-workshop/petals) distributed system with optimizations for Apple Silicon, improved local network discovery, and real-time swarm visualization. Run large language models like BLOOM-176B and Llama across multiple Apple Silicon machines efficiently and gain insights into their dynamic behavior.
 
 ## 🚀 Key Enhancements
 
@@ -9,30 +9,49 @@ This repository extends the [Petals](https://github.com/bigscience-workshop/peta
 - **Resource Management**: Intelligent process locking and resource monitoring to prevent system overload
 - **Enhanced Stability**: Graceful handling of peer connections and process management
 - **Auto-Swarm Configuration**: Automatically detects and joins existing swarms or creates new ones
+- **Real-time Swarm Visualization**: Dynamic Pyglet-based visualization of internal swarm states and pattern evolution.
 
 ## 🔧 Quick Start
 
-### Running a Server Node
+### Running the Demo with Visualization
+
+The primary way to experience the enhanced features, including the dynamic visualization, is by running the `swarm_vignettes.py` script. This showcases various swarm behaviors and their visual representation.
 
 ```bash
-# Clone this repository
-git clone https://github.com/yourusername/petals-metal
-cd petals-metal
+# Clone this repository (if you haven't already)
+# git clone https://github.com/yourusername/petals-metal
+# cd petals-metal
 
-# Install dependencies
+# Install dependencies (ensure pyglet is included)
 pip install -r requirements.txt
 
-# Start a server node - automatically joins existing swarm or creates new one
+# Run the pattern evolution swarm demo with Pyglet visualization
+python swarm_vignettes.py
+```
+
+The demo will automatically:
+- Initialize models and the pattern management system.
+- Launch a Pyglet window displaying a real-time visualization of the evolving patterns (a "mandala").
+- Show dynamic elements like "shooting stars" representing activity (press 'S' to spawn more stars).
+- Allow for some interaction (e.g., mouse dragging may perturb the main visual pattern).
+- Log detailed information to the console (set to DEBUG level by default in this script).
+
+### Running a Server Node (Headless)
+
+If you need to run a headless server node (e.g., for a distributed setup without immediate local visualization on that node), the `./run-local.sh` script can still be used. (Ensure this script is configured for your desired headless server behavior).
+
+```bash
+# To start a server node (potentially without local GUI visualization)
 ./run-local.sh
 ```
 
-The server will automatically:
-- Check system resources
-- Acquire process locks to prevent multiple instances
-- Detect existing Petals swarms on the local network
-- Create new swarm if none exists, or join existing swarm
-- Advertise itself on the local network
-- Use MPS acceleration for optimal performance
+The server (when run via `./run-local.sh`) typically:
+- Checks system resources.
+- Acquires process locks to prevent multiple instances.
+- Detects existing Petals swarms on the local network.
+- Creates a new swarm if none exists, or joins an existing swarm.
+- Advertises itself on the local network.
+- Uses MPS acceleration for optimal performance.
 
 ### Connecting as a Client
 
@@ -112,18 +131,25 @@ The system uses smart network configuration:
 
 ## 🔍 Debugging & Monitoring
 
-The system provides comprehensive logging:
-```python
-import logging
-logging.basicConfig(level=logging.INFO)
-```
+The system provides comprehensive logging and direct visual feedback for monitoring and debugging:
+
+- **Detailed Console Logging**: The `swarm_vignettes.py` script, by default, configures logging to the `DEBUG` level, providing a rich stream of information about:
+    ```python
+    import logging
+    # Example: logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    ```
+- **Pyglet Visualization Window**: The primary tool for observing the live state of the pattern evolution, including the mandala and dynamic star elements.
 
 Monitor:
-- Peer discovery events
-- Swarm formation and joining
-- Resource usage
-- Process locks
-- Server status
+- Peer discovery events (if applicable to the running script)
+- Swarm formation and joining (if applicable)
+- **Real-time pattern evolution via Pyglet visualization**
+- **Dynamic event visualization (e.g., shooting stars, tensor perturbations)**
+- Resource usage (as logged by underlying processes)
+- Process locks (if applicable)
+- Server status (if running a server component)
+- **Detailed star state changes (position, lifetime) via DEBUG logs**
+- **Async task scheduling and execution flow via DEBUG logs**
 
 ## 💡 Contributing
 

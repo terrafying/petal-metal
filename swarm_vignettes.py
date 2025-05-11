@@ -12,8 +12,163 @@ import logging
 import pyglet
 import pyglet.shapes as pyglet_shapes
 import pyglet.graphics
+import random # For randomizing star properties
+import math # For atan2, degrees for tail rotation
 
 logger = logging.getLogger(__name__)
+
+# --- Intriguing Keywords for EntendreGlyphs ---
+INTRIGUING_KEYWORDS = [
+    "echo", "mirror", "paradox", "cycle", "illusion", "reflect",
+    "shadow", "play", "riddle", "enigma", "ephemeral", "trace",
+    "whisper", "dream", "flow", "tide", "wave", "hidden"
+]
+
+# --- EntendreGlyph Class ---
+class EntendreGlyph:
+    def __init__(self, text, x, y, batch, group, window_width, window_height, lifetime=3.0, color=(200, 200, 255)):
+        self.text = text
+        self.x = x
+        self.y = y
+        self.batch = batch
+        self.group = group
+        self.window_width = window_width
+        self.window_height = window_height
+        self.initial_lifetime = lifetime
+        self.lifetime = lifetime
+        self.color = color # Base color (r, g, b)
+
+        self.label = pyglet.text.Label(
+            self.text,
+            font_name='Arial',
+            font_size=random.uniform(12, 20),
+            x=self.x, y=self.y,
+            anchor_x='center', anchor_y='center',
+            color=(*self.color, 255), # Initial full opacity
+            batch=self.batch,
+            group=self.group
+        )
+        logger.debug(f"New EntendreGlyph: '{self.text}' at ({self.x:.0f},{self.y:.0f}), lifetime={self.lifetime:.2f}s")
+
+    def update(self, dt):
+        self.lifetime -= dt
+        if self.lifetime <= 0:
+            return False
+
+        # Fade out opacity based on lifetime
+        current_opacity = int(max(0, (self.lifetime / self.initial_lifetime)) * 255)
+        self.label.color = (*self.color, current_opacity)
+        
+        # Optional: subtle drift or other animation could be added here
+        # self.label.y -= 5 * dt # Example: slow downward drift
+
+        return True
+
+    def delete(self):
+        if self.label:
+            self.label.delete()
+            self.label = None # Avoid trying to delete again
+        logger.info(f"Deleted EntendreGlyph: '{self.text}'")
+
+# --- ShootingStar Class ---
+class ShootingStar:
+    def __init__(self, x, y, batch, group, window_width, window_height):
+        self.window_width = window_width
+        self.window_height = window_height
+        self.batch = batch
+        self.group = group
+
+        self.x = x
+        self.y = y
+        
+        self.velocity_x = random.uniform(100, 300) * random.choice([-1, 1])
+        self.velocity_y = random.uniform(100, 300) * random.choice([-1, 1]) # Made y-velocity potentially faster
+        self.lifetime = random.uniform(1.5, 3.5)  # seconds
+        self.initial_star_lifetime = self.lifetime # Store initial lifetime for opacity
+        
+        star_radius = random.uniform(4, 10)
+        self.tail_length = random.uniform(50, 150) # Longer tails
+        self.tail_width = star_radius * 0.8
+        
+        r, g, b = random.randint(200, 255), random.randint(200, 255), random.randint(150, 255)
+        self.color_head = (r, g, b)
+        self.color_tail = (r, g, b) # Tail will use opacity for fading
+
+        self.star_shape = pyglet_shapes.Star(
+            self.x, self.y,
+            outer_radius=star_radius,
+            inner_radius=star_radius * 0.5,
+            num_spikes=5,
+            color=self.color_head,
+            batch=self.batch,
+            group=self.group
+        )
+        
+        # Tail is a Rectangle
+        self.tail_shape = pyglet_shapes.Rectangle(
+            self.x, self.y - self.tail_width / 2, # Initial position, anchor adjusted later
+            width=self.tail_length, 
+            height=self.tail_width,
+            color=self.color_tail, 
+            batch=self.batch, 
+            group=self.group
+        )
+        # Set anchor point to the middle of the short edge that connects to the star
+        self.tail_shape.anchor_x = 0 # Anchor at the start of the rectangle (length-wise)
+        self.tail_shape.anchor_y = self.tail_width / 2 # Anchor in the middle (height-wise)
+        
+        # Initial rotation based on velocity
+        angle_rad = math.atan2(self.velocity_y, self.velocity_x)
+        self.tail_shape.rotation = math.degrees(angle_rad)
+        self.star_shape.rotation = math.degrees(angle_rad) + 90 # Point star in direction of travel
+        logger.debug(f"New Star: ({self.x:.1f},{self.y:.1f}) vx={self.velocity_x:.1f}, vy={self.velocity_y:.1f}, lifetime={self.lifetime:.2f}")
+
+    def update(self, dt):
+        self.lifetime -= dt
+        if self.lifetime <= 0:
+            logger.debug(f"Star lifetime ended: ({self.x:.1f},{self.y:.1f})")
+            return False
+
+        dx = self.velocity_x * dt
+        dy = self.velocity_y * dt
+        
+        prev_x, prev_y = self.x, self.y
+        self.x += dx
+        self.y += dy
+
+        self.star_shape.x = self.x
+        self.star_shape.y = self.y
+        
+        self.tail_shape.x = self.x 
+        self.tail_shape.y = self.y 
+
+        # Update rotation for both star and tail
+        angle_rad = math.atan2(self.velocity_y, self.velocity_x)
+        current_rotation_deg = math.degrees(angle_rad)
+        self.tail_shape.rotation = current_rotation_deg
+        self.star_shape.rotation = current_rotation_deg + 90 # Keep star pointed
+        
+        # Fade out opacity based on lifetime
+        # Opacity for shapes is 0-255
+        # Normalize over its initial lifetime for a more consistent fade
+        current_opacity = int(max(0, (self.lifetime / self.initial_star_lifetime)) * 255) 
+        self.star_shape.opacity = current_opacity
+        self.tail_shape.opacity = int(current_opacity * 0.7) # Tail slightly more transparent
+
+        logger.debug(f"Star @({prev_x:.1f},{prev_y:.1f}) update: dt={dt:.4f}, v=({self.velocity_x:.1f},{self.velocity_y:.1f}), " \
+                     f"d=({dx:.2f},{dy:.2f}) -> new_pos=({self.x:.1f},{self.y:.1f}), life={self.lifetime:.2f}")
+
+        if self.x > self.window_width + self.tail_length or self.x < -self.tail_length or \
+           self.y > self.window_height + self.tail_length or self.y < -self.tail_length:
+            logger.debug(f"Star @({self.x:.1f},{self.y:.1f}) out of bounds.")
+            return False
+
+        return True
+
+    def delete(self):
+        self.star_shape.delete()
+        self.tail_shape.delete()
+        logger.info(f"Deleted shooting star at ({self.x:.0f}, {self.y:.0f})")
 
 # Callback function to observe flock state during iterations
 def log_flock_iteration_state(iteration_num: int, texts: List[str], tensors: List[torch.Tensor]):
@@ -37,12 +192,16 @@ pyglet_fps_display = None
 # Groups for rendering order (optional, but good practice)
 pyglet_group_background = None
 pyglet_group_foreground = None
+pyglet_group_stars = None # New group for stars, potentially rendered on top
+pyglet_group_glyphs = None # For EntendreGlyphs
 
 # Shared state for the async update loop and Pyglet
 current_pattern_tensor = None
 generation_cycle_count = 0
 mandala_overall_rotation_angle = 0.0 # For constant global rotation
 stop_event = asyncio.Event() # For cleanly stopping the async loop
+active_stars = [] # List to hold active ShootingStar objects
+active_glyphs = [] # List to hold active EntendreGlyph objects
 
 # Vignette 1: Minimal Language-Specific Swarm
 async def language_specific_swarm():
@@ -116,9 +275,9 @@ async def pattern_evolution_update_cycle(flock_generator: FlockGenerator,
                                          storyteller: Storyteller, 
                                          vector_viz: VectorDrivenVisualizer,
                                          semantic_prompts_sequence: List[Dict]):
-    global current_pattern_tensor, generation_cycle_count
+    global current_pattern_tensor, generation_cycle_count, active_glyphs, pyglet_window, pyglet_batch, pyglet_group_glyphs
     
-    logger.info(f"Starting Generation Cycle {generation_cycle_count + 1}")
+    logger.debug(f"pattern_evolution_update_cycle - START - Gen Cycle {generation_cycle_count + 1}")
     current_batch_generated_items: List[Tuple[str, torch.Tensor]] = []
 
     # Select the current prompt from the sequence based on generation_cycle_count
@@ -149,6 +308,22 @@ async def pattern_evolution_update_cycle(flock_generator: FlockGenerator,
     if current_batch_generated_items:
         generated_text, pattern_tensor_candidate = current_batch_generated_items[-1]
         
+        # --- EntendreGlyph Creation ---
+        if pyglet_window: # Ensure window exists before creating glyphs
+            for keyword in INTRIGUING_KEYWORDS:
+                if keyword in generated_text.lower(): # Case-insensitive check
+                    glyph_x = random.uniform(pyglet_window.width * 0.1, pyglet_window.width * 0.9)
+                    glyph_y = random.uniform(pyglet_window.height * 0.1, pyglet_window.height * 0.9)
+                    new_glyph = EntendreGlyph(
+                        text=keyword,
+                        x=glyph_x, y=glyph_y,
+                        batch=pyglet_batch, group=pyglet_group_glyphs,
+                        window_width=pyglet_window.width, window_height=pyglet_window.height
+                    )
+                    active_glyphs.append(new_glyph)
+                    logger.info(f"Created EntendreGlyph for keyword: '{keyword}' in text.")
+        # --- End EntendreGlyph Creation ---
+
         if not isinstance(pattern_tensor_candidate, torch.Tensor):
             logger.error(f"Pattern is not a tensor ({type(pattern_tensor_candidate)}), using zero tensor.")
             # Ensure a correctly sized zero tensor if possible
@@ -206,42 +381,25 @@ async def pattern_evolution_update_cycle(flock_generator: FlockGenerator,
     logger.info(f"  Average depth: {stats.get('average_depth', 0.0):.2f}")
     logger.info(f"  Temporal coherence: {stats.get('temporal_coherence', 0.0):.2f}")
 
-    narrative_file_path = f'narrative_generation_cycle_{generation_cycle_count + 1}.txt'
-    with open(narrative_file_path, 'w') as f:
-        f.write(f"=== Narrative Generation Cycle {generation_cycle_count + 1} ===\n\n")
-        f.write(f"Narrative Text:\n{narrative.get('narrative', 'N/A')}\n\n")
-        f.write(f"Themes: {', '.join(narrative.get('themes', []))}\n\n")
-        f.write(f"Emotional Arc: {', '.join([f'{e:.2f}' for e in narrative.get('emotional_arc', [])])}\n\n")
-        f.write("=== Visual & Auditory Elements (from Storyteller Threads) ===\n")
-        for idx, vis_element in enumerate(narrative.get("visual_elements", [])):
-            f.write(f"\n--- Element {idx+1} ---\n")
-            f.write(f"Theme: {vis_element.get('theme', 'N/A')}\n")
-            f.write(f"Emotional Valence: {vis_element.get('emotional_valence', 0.0):.2f}\n")
-            f.write(f"Mandala:\n{vis_element.get('mandala', 'No mandala generated.')}\n")
-            f.write(f"Concretion:\n{vis_element.get('concretion', 'No concretion generated.')}\n")
-            thread_context = vis_element.get('context', {})
-            if thread_context:
-                mantra_cfg = thread_context.get('mantra_config', {})
-                f.write(f"Context: Gen Cycle {thread_context.get('generation_cycle', 'N/A')}, "
-                          f"Mantra: {mantra_cfg.get('mantra', 'N/A')}, "
-                          f"Scale: {mantra_cfg.get('temporal_scale', 'N/A')}, "
-                          f"Freq: {mantra_cfg.get('frequency', 'N/A')}, "
-                          f"Shape: {thread_context.get('pattern_shape', 'N/A')}, "
-                          f"Text: '{thread_context.get('generated_text_preview','N/A')}'\n")
-
     generation_cycle_count += 1
     if generation_cycle_count >= 100: # Max cycles condition
         stop_event.set()
+
+    logger.debug(f"pattern_evolution_update_cycle - END - Gen Cycle {generation_cycle_count}")
 
 # Vignette 2: Pattern Evolution Swarm (Pyglet Version)
 async def pattern_evolution_swarm():
     """Run pattern evolution swarm with Pyglet-driven visuals."""
     global pyglet_window, pyglet_batch, pyglet_fps_display, current_pattern_tensor, generation_cycle_count
-    global pyglet_group_background, pyglet_group_foreground, stop_event
+    global pyglet_group_background, pyglet_group_foreground, pyglet_group_stars, pyglet_group_glyphs, stop_event, active_stars, active_glyphs
 
-    # Explicitly clear the stop_event and reset cycle count at the start of this function
-    stop_event.clear()
+    # Get the currently running asyncio event loop
+    loop = asyncio.get_running_loop()
+
+    stop_event.clear() # Ensure cleared at the very start
     generation_cycle_count = 0
+    active_stars = []
+    active_glyphs = [] # Initialize our new list
 
     model_configs = [
         {"name": "distilgpt2", "params": 82, "memory": 500, "speed": "fast"},
@@ -250,17 +408,14 @@ async def pattern_evolution_swarm():
     selected_models = [config["name"] for config in model_configs]
     flock_config = FlockConfig(
         num_models=len(selected_models), pattern_depth=3, batch_size=2, max_length=64,
-        # language_specialization="en", # Removed to use the new default (None)
         flock_cohesion=0.3, flock_alignment=0.2,
         flock_separation=0.4, temperature=0.85,
-        mandala_flow_alpha=0.3 # Increased from default 0.1 to make changes more visible
+        mandala_flow_alpha=0.3
     )
     flock_gen = FlockGenerator(selected_models, config=flock_config)
     story_tell = Storyteller(flock_gen.pattern_manager)
-    # mandala_size in VectorDrivenVisualizer is now more of a conceptual unit for calculations
-    vector_vis = VectorDrivenVisualizer(mandala_size=20, concretion_size=20) 
+    vector_vis = VectorDrivenVisualizer(mandala_size=20, concretion_size=20)
     
-    # New semantic flow sequence
     semantic_flow_prompts = [
         {"mantra": "dinosaur", "temporal_scale": 1.0, "frequency": 1.0},
         {"mantra": "meteor", "temporal_scale": 1.0, "frequency": 1.0},
@@ -281,26 +436,45 @@ async def pattern_evolution_swarm():
         pyglet_batch = pyglet.graphics.Batch()
         pyglet_fps_display = pyglet.window.FPSDisplay(window=pyglet_window)
         
-        # Optional: Define rendering groups for layers
-        pyglet_group_background = pyglet.graphics.Group() 
-        pyglet_group_foreground = pyglet.graphics.Group()
+        pyglet_group_background = pyglet.graphics.Group(order=0)
+        pyglet_group_foreground = pyglet.graphics.Group(order=1)
+        pyglet_group_stars = pyglet.graphics.Group(order=2)
+        pyglet_group_glyphs = pyglet.graphics.Group(order=3) # Glyphs on top of stars, or adjust as needed
 
-        # Shared state for mouse interaction
-        mouse_is_dragging = False # Simple state to track if dragging
+        mouse_is_dragging = False
 
-        # Initial pattern tensor (e.g., zeros)
         hidden_size = flock_gen.models[0].model.config.hidden_size if flock_gen.models else 768
         device_to_use = flock_gen.models[0].device if flock_gen.models else 'cpu'
         current_pattern_tensor = torch.zeros(hidden_size, device=device_to_use)
         
-        # Update visualizer with initial state
         vector_vis.update_geometric_mandala_pyglet(
-            current_pattern_tensor, pyglet_batch, 
-            group_foreground=pyglet_group_foreground, 
+            current_pattern_tensor, pyglet_batch,
+            group_foreground=pyglet_group_foreground,
             group_background=pyglet_group_background,
             window_width=pyglet_window.width, window_height=pyglet_window.height,
             mandala_shape_bias=flock_gen.config.mandala_shape_bias
         )
+
+        if pyglet_window and pyglet_batch and pyglet_group_stars:
+            initial_star_x = random.uniform(0, pyglet_window.width)
+            initial_star_y = pyglet_window.height * 0.8 # Lowered initial Y spawn point
+            new_star = ShootingStar(initial_star_x, initial_star_y, pyglet_batch, pyglet_group_stars, pyglet_window.width, pyglet_window.height)
+            active_stars.append(new_star)
+            logger.info(f"Spawned initial shooting star at ({initial_star_x:.0f}, {initial_star_y:.0f})")
+
+            # --- TEMPORARY TEST: Force a glyph to be created ---
+            if pyglet_group_glyphs: # Ensure glyph group exists
+                test_glyph = EntendreGlyph(
+                    text="TEST_GLYPH",
+                    x=pyglet_window.width / 2,
+                    y=pyglet_window.height / 2,
+                    batch=pyglet_batch, group=pyglet_group_glyphs,
+                    window_width=pyglet_window.width, window_height=pyglet_window.height,
+                    lifetime=10.0 # Long lifetime for testing
+                )
+                active_glyphs.append(test_glyph)
+                logger.info("Spawned TEMPORARY TEST_GLYPH")
+            # --- END TEMPORARY TEST ---
 
     except Exception as e:
         logger.error(f"Pyglet window initialization failed: {e}", exc_info=True)
@@ -309,23 +483,23 @@ async def pattern_evolution_swarm():
 
     @pyglet_window.event
     def on_draw():
+        logger.debug("on_draw event fired.")
         pyglet_window.clear()
         pyglet_batch.draw()
         pyglet_fps_display.draw()
 
     @pyglet_window.event
     def on_resize(width, height):
-        logger.info(f"Pyglet window resized to: {width}x{height}") # Log resize
-        # If visualizer needs to know about resizes to adjust scaling:
-        if current_pattern_tensor is not None: # Ensure tensor exists
+        logger.info(f"Pyglet window resized to: {width}x{height}")
+        if current_pattern_tensor is not None:
              vector_vis.update_geometric_mandala_pyglet(
                 current_pattern_tensor, pyglet_batch,
-                group_foreground=pyglet_group_foreground, 
+                group_foreground=pyglet_group_foreground,
                 group_background=pyglet_group_background,
                 window_width=width, window_height=height,
                 mandala_shape_bias=flock_gen.config.mandala_shape_bias
             )
-        return pyglet.event.EVENT_HANDLED # Recommended by Pyglet docs for on_resize
+        return pyglet.event.EVENT_HANDLED
 
     @pyglet_window.event
     def on_mouse_press(x, y, button, modifiers):
@@ -344,79 +518,144 @@ async def pattern_evolution_swarm():
     @pyglet_window.event
     def on_mouse_drag(x, y, dx, dy, buttons, modifiers):
         nonlocal mouse_is_dragging
-        global current_pattern_tensor # We need to modify the global tensor
-        
+        global current_pattern_tensor
         if mouse_is_dragging and (buttons & pyglet.window.mouse.LEFT):
             if current_pattern_tensor is not None and isinstance(current_pattern_tensor, torch.Tensor):
-                perturb_scale = 0.005 # Adjusted scale for potentially more visible effect
-                
-                # Ensure indices are within bounds
-                idx1, idx2 = 0, 1 # Example indices to perturb
-                if current_pattern_tensor.numel() > max(idx1, idx2):
-                    # Create a perturbation tensor on the same device
-                    perturbation_addition = torch.zeros_like(current_pattern_tensor)
-                    perturbation_addition[idx1] += dx * perturb_scale
-                    perturbation_addition[idx2] += dy * perturb_scale
+                perturb_scale = 0.005
+                idx1, idx2 = 0, 1 # Indices to perturb along the last dimension
+
+                # Check if the last dimension is large enough for the chosen indices
+                if current_pattern_tensor.shape[-1] > max(idx1, idx2):
+                    perturbation_addition_tensor = torch.zeros_like(current_pattern_tensor)
+                    applied_perturbation = False
                     
-                    current_pattern_tensor.add_(perturbation_addition) # In-place addition
+                    if current_pattern_tensor.ndim == 1:
+                        # Tensor is 1D, e.g. (H,)
+                        perturbation_addition_tensor[idx1] += dx * perturb_scale
+                        perturbation_addition_tensor[idx2] += dy * perturb_scale
+                        applied_perturbation = True
+                    elif current_pattern_tensor.ndim == 2 and current_pattern_tensor.shape[0] == 1:
+                        # Tensor is 2D with shape (1, H)
+                        perturbation_addition_tensor[0, idx1] += dx * perturb_scale
+                        perturbation_addition_tensor[0, idx2] += dy * perturb_scale
+                        applied_perturbation = True
                     
-                    logger.info(f"Mouse Drag: Perturbed tensor by ({dx*perturb_scale:.4f}, {dy*perturb_scale:.4f}) on indices {idx1}, {idx2}")
+                    if applied_perturbation:
+                        current_pattern_tensor.add_(perturbation_addition_tensor)
+                        logger.info(f"Mouse Drag: Perturbed tensor by ({dx*perturb_scale:.4f}, {dy*perturb_scale:.4f}) on indices {idx1}, {idx2} of the pattern.")
+                    else:
+                        logger.warning(f"Mouse Drag: Tensor has unhandled shape {current_pattern_tensor.shape} for perturbation. current_pattern_tensor was not modified.")
                 else:
-                    logger.warning("Mouse Drag: Tensor too small to perturb chosen indices.")
+                    logger.warning(f"Mouse Drag: Tensor's last dimension (size {current_pattern_tensor.shape[-1]}) too small to perturb chosen indices {idx1}, {idx2}. current_pattern_tensor was not modified.")
             else:
                 logger.warning("Mouse Drag: current_pattern_tensor is None or not a Tensor.")
 
-    async def scheduled_update(dt): # dt is delta time from pyglet clock
-        global mandala_overall_rotation_angle # Corrected to global
-        logger.info(f"Scheduled_update - START - cycle: {generation_cycle_count}") 
+    @pyglet_window.event
+    def on_key_press(symbol, modifiers):
+        global active_stars
+        if symbol == pyglet.window.key.S:
+            if pyglet_window and pyglet_batch and pyglet_group_stars:
+                spawn_x = random.uniform(0, pyglet_window.width)
+                spawn_y = random.uniform(pyglet_window.height * 0.7, pyglet_window.height)
+                new_star = ShootingStar(spawn_x, spawn_y, pyglet_batch, pyglet_group_stars, pyglet_window.width, pyglet_window.height)
+                active_stars.append(new_star)
+                logger.info(f"Spawned new star via keypress at ({spawn_x:.0f}, {spawn_y:.0f})")
+
+    async def scheduled_update(dt):
+        global mandala_overall_rotation_angle, active_stars, active_glyphs
+        logger.debug(f"Scheduled_update - START - dt_received: {dt:.4f}, cycle: {generation_cycle_count}, Active Stars: {len(active_stars)}, Active Glyphs: {len(active_glyphs)}")
         if stop_event.is_set():
             logger.info("Stop event received in scheduled_update, closing Pyglet window.")
-            pyglet_window.close()
+            if pyglet_window and not pyglet_window.has_exit:
+                pyglet_window.close()
             return
 
-        mandala_overall_rotation_angle += 0.5 # Increment for constant rotation
+        mandala_overall_rotation_angle += 0.5
         if mandala_overall_rotation_angle > 360: mandala_overall_rotation_angle -= 360
 
         await pattern_evolution_update_cycle(flock_gen, story_tell, vector_vis, semantic_flow_prompts)
         
         if current_pattern_tensor is not None:
             tensor_mean = current_pattern_tensor.mean().item() if isinstance(current_pattern_tensor, torch.Tensor) else 'N/A'
-            logger.info(f"Scheduled_update - Updating visuals with tensor (mean: {tensor_mean}), Overall Rotation: {mandala_overall_rotation_angle:.2f}") 
+            logger.debug(f"Scheduled_update - Updating visuals with tensor (mean: {tensor_mean}), Overall Rotation: {mandala_overall_rotation_angle:.2f}")
             vector_vis.update_geometric_mandala_pyglet(
                 current_pattern_tensor, pyglet_batch,
-                group_foreground=pyglet_group_foreground, 
+                group_foreground=pyglet_group_foreground,
                 group_background=pyglet_group_background,
                 window_width=pyglet_window.width, window_height=pyglet_window.height,
                 mandala_shape_bias=flock_gen.config.mandala_shape_bias,
-                overall_rotation_angle_deg=mandala_overall_rotation_angle # Pass the new angle
+                overall_rotation_angle_deg=mandala_overall_rotation_angle
             )
-        logger.info(f"Scheduled_update - END - cycle: {generation_cycle_count-1}")
+        
+        stars_to_remove = []
+        for star in active_stars:
+            if not star.update(dt):
+                stars_to_remove.append(star)
+        
+        for star in stars_to_remove:
+            star.delete()
+            active_stars.remove(star)
+        
+        # Update and remove EntendreGlyphs
+        glyphs_to_remove = []
+        for glyph in active_glyphs:
+            if not glyph.update(dt):
+                glyphs_to_remove.append(glyph)
+        
+        for glyph in glyphs_to_remove:
+            glyph.delete()
+            active_glyphs.remove(glyph)
+            
+        logger.debug(f"Scheduled_update - END - cycle: {generation_cycle_count-1}, Active Stars: {len(active_stars)}, Active Glyphs: {len(active_glyphs)}")
 
-    # Schedule the async update function.
-    # pyglet.clock.schedule_interval_soft is generally safer for variable-load tasks
-    # to prevent the app from hanging if an update takes too long.
-    def pyglet_update_wrapper(dt):
-        logger.info(f"Pyglet_update_wrapper called with dt: {dt:.4f}") # Log wrapper call
-        task = asyncio.ensure_future(scheduled_update(dt))
-        def task_done_callback(fut):
-            try:
-                fut.result() # Call result() to raise exception if task failed
-            except asyncio.CancelledError:
-                logger.info("Async task scheduled_update was cancelled.")
-            except Exception as e:
-                logger.error(f"Async task scheduled_update failed: {e}", exc_info=True)
-        task.add_done_callback(task_done_callback)
+    pyglet.gl.glClearColor(0.1, 0.1, 0.1, 1.0)
+    stop_event.clear() # stop_event is already cleared at the top, but re-clearing after setup is fine.
+    logger.info("Starting Pyglet app with integrated asyncio/Pyglet event loop...")
 
-    pyglet.clock.schedule_interval_soft(pyglet_update_wrapper, 1/10.0) # Aim for 10 FPS
+    try:
+        while not pyglet_window.has_exit and not stop_event.is_set():
+            dt = pyglet.clock.tick() # Get DT, advances pyglet clock, allows event polling
 
-    # Set background color (once)
-    pyglet.gl.glClearColor(0.1, 0.1, 0.1, 1.0) # Dark grey background (R,G,B,A from 0-1)
+            # Process Pyglet platform events (OS messages, input, etc.)
+            pyglet.app.platform_event_loop.step(timeout=1/200.0) 
 
-    pyglet.app.run()
+            # Explicitly dispatch Pyglet window events (like on_draw, on_resize, etc.)
+            pyglet_window.dispatch_events() # This should ensure on_draw is called if needed
+
+            if pyglet_window.has_exit or stop_event.is_set(): 
+                break
+
+            await scheduled_update(dt) # Run our main async update logic
+
+            pyglet_window.flip() # Ensure the frame is displayed
+
+            await asyncio.sleep(0.001) 
+
+    except Exception as e:
+        logger.error(f"Error in Pyglet/asyncio main loop: {e}", exc_info=True)
+        stop_event.set() # Ensure stop_event is set to facilitate graceful shutdown
+    finally:
+        # Ensure Pyglet window is closed if it hasn't been already (e.g., if loop exited due to stop_event)
+        if pyglet_window and not pyglet_window.has_exit:
+            pyglet_window.close() # This should make pyglet_window.has_exit true
+        
+        logger.info("Pyglet/asyncio integrated event loop terminated.")
     
-    # Cleanup after pyglet.app.run() finishes (e.g. if window closed manually)
-    stop_event.set() # Signal async tasks to wind down if any are still pending
-    logger.info("Pattern evolution swarm (Pyglet) completed or exited.")
+    logger.info("Pattern evolution swarm (Pyglet) completed or exited main loop section.") # Clarified log
+    # Ensure any remaining asyncio tasks are cancelled if pyglet exits
+    # and stop_event wasn't the cause (e.g. window closed manually)
+    if not stop_event.is_set():
+        stop_event.set() # Signal any lingering async tasks to stop
+    
+    # Cancel all outstanding asyncio tasks
+    tasks = [t for t in asyncio.all_tasks(loop=loop) if t is not asyncio.current_task(loop=loop)]
+    if tasks:
+        logger.info(f"Cancelling {len(tasks)} outstanding asyncio tasks...")
+        for task in tasks:
+            task.cancel()
+        # Allow cancellations to propagate
+        await asyncio.gather(*tasks, return_exceptions=True)
+        logger.info("Asyncio tasks cancelled.")
 
 # Vignette 3: Resource-Aware Swarm
 async def resource_aware_swarm():
@@ -668,7 +907,8 @@ async def run_vignettes():
 
 if __name__ == "__main__":
     # Configure logging to see the output from the callback
-    logging.basicConfig(level=logging.INFO, 
+    # Set level to DEBUG to see the new detailed star update logs
+    logging.basicConfig(level=logging.DEBUG, 
                         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     
     # To run the Pyglet based pattern evolution:
