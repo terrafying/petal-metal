@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from pattern_manager import PatternManager, SecurityConfig, ResonantMode
 from flock_generator import FlockConfig, FlockGenerator, IterationCallback
+from shape_visualizer import ShapeVisualizer
 from visualization_manager import VectorDrivenVisualizer
 import numpy as np
 from storyteller import Storyteller
@@ -14,6 +15,18 @@ import pyglet.shapes as pyglet_shapes
 import pyglet.graphics
 import random # For randomizing star properties
 import math # For atan2, degrees for tail rotation
+import seaborn as sns
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+from matplotlib.animation import FFMpegWriter
+import ray
+from ray import tune
+from ray.tune.schedulers import ASHAScheduler
+import os
+import tempfile
+from pathlib import Path
+import json
+import psutil
 
 logger = logging.getLogger(__name__)
 
@@ -407,7 +420,7 @@ async def pattern_evolution_swarm():
     ]
     selected_models = [config["name"] for config in model_configs]
     flock_config = FlockConfig(
-        num_models=len(selected_models), pattern_depth=3, batch_size=2, max_length=64,
+        num_models=len(selected_models), pattern_depth=8, batch_size=53, max_length=41,
         flock_cohesion=0.3, flock_alignment=0.2,
         flock_separation=0.4, temperature=0.85,
         mandala_flow_alpha=0.3
@@ -432,14 +445,29 @@ async def pattern_evolution_swarm():
 
     # --- Pyglet Setup ---
     try:
-        pyglet_window = pyglet.window.Window(width=800, height=800, caption='Pattern Evolution (Pyglet)', resizable=True)
+        # Configure OpenGL settings before creating window
+        
+        pyglet_window = pyglet.window.Window(
+            width=800, 
+            height=800, 
+            caption='Pattern Evolution (Pyglet)', 
+            resizable=True,
+            vsync=True  # Enable vertical sync
+        )
+        
+        # Enable alpha blending and set clear color
+        pyglet.gl.glEnable(pyglet.gl.GL_BLEND)
+        pyglet.gl.glBlendFunc(pyglet.gl.GL_SRC_ALPHA, pyglet.gl.GL_ONE_MINUS_SRC_ALPHA)
+        pyglet.gl.glClearColor(0.02, 0.02, 0.05, 1.0)  # Very dark blue-black
+        
+        # Create batch and groups
         pyglet_batch = pyglet.graphics.Batch()
         pyglet_fps_display = pyglet.window.FPSDisplay(window=pyglet_window)
         
         pyglet_group_background = pyglet.graphics.Group(order=0)
         pyglet_group_foreground = pyglet.graphics.Group(order=1)
         pyglet_group_stars = pyglet.graphics.Group(order=2)
-        pyglet_group_glyphs = pyglet.graphics.Group(order=3) # Glyphs on top of stars, or adjust as needed
+        pyglet_group_glyphs = pyglet.graphics.Group(order=3)
 
         mouse_is_dragging = False
 
@@ -477,16 +505,20 @@ async def pattern_evolution_swarm():
             # --- END TEMPORARY TEST ---
 
     except Exception as e:
-        logger.error(f"Pyglet window initialization failed: {e}", exc_info=True)
-        print(f"ERROR: Could not initialize Pyglet window. Ensure you have an X server or equivalent. {e}")
-        return
+        logger.error(f"Pyglet window initialization failed: {e}", exc_info=e)
+        raise e
 
     @pyglet_window.event
     def on_draw():
         logger.debug("on_draw event fired.")
-        pyglet_window.clear()
-        pyglet_batch.draw()
-        pyglet_fps_display.draw()
+        try:
+            pyglet_window.clear()
+            pyglet.gl.glClear(pyglet.gl.GL_COLOR_BUFFER_BIT)
+            pyglet_batch.draw()
+            pyglet_fps_display.draw()
+            logger.debug("Frame drawn successfully.")
+        except Exception as e:
+            logger.error(f"Error in on_draw: {e}", exc_info=True)
 
     @pyglet_window.event
     def on_resize(width, height):
@@ -570,70 +602,111 @@ async def pattern_evolution_swarm():
                 pyglet_window.close()
             return
 
+        # Track memory usage
+        if torch.cuda.is_available():
+            memory_allocated = torch.cuda.memory_allocated() / 1024**2  # MB
+            memory_reserved = torch.cuda.memory_reserved() / 1024**2    # MB
+            logger.info(f"GPU Memory - Allocated: {memory_allocated:.1f}MB, Reserved: {memory_reserved:.1f}MB")
+        else:
+            process = psutil.Process()
+            memory_info = process.memory_info()
+            logger.info(f"CPU Memory - RSS: {memory_info.rss / 1024**2:.1f}MB, VMS: {memory_info.vms / 1024**2:.1f}MB")
+
         mandala_overall_rotation_angle += 0.5
         if mandala_overall_rotation_angle > 360: mandala_overall_rotation_angle -= 360
 
-        await pattern_evolution_update_cycle(flock_gen, story_tell, vector_vis, semantic_flow_prompts)
+        # Run pattern evolution in a separate task to prevent blocking
+        try:
+            pattern_task = asyncio.create_task(
+                pattern_evolution_update_cycle(flock_gen, story_tell, vector_vis, semantic_flow_prompts)
+            )
+            await asyncio.wait_for(pattern_task, timeout=0.1)  # 100ms timeout
+        except asyncio.TimeoutError:
+            logger.warning("Pattern evolution cycle took too long, continuing with visualization")
+        except Exception as e:
+            logger.error(f"Error in pattern evolution cycle: {e}", exc_info=True)
         
         if current_pattern_tensor is not None:
             tensor_mean = current_pattern_tensor.mean().item() if isinstance(current_pattern_tensor, torch.Tensor) else 'N/A'
-            logger.debug(f"Scheduled_update - Updating visuals with tensor (mean: {tensor_mean}), Overall Rotation: {mandala_overall_rotation_angle:.2f}")
-            vector_vis.update_geometric_mandala_pyglet(
-                current_pattern_tensor, pyglet_batch,
-                group_foreground=pyglet_group_foreground,
-                group_background=pyglet_group_background,
-                window_width=pyglet_window.width, window_height=pyglet_window.height,
-                mandala_shape_bias=flock_gen.config.mandala_shape_bias,
-                overall_rotation_angle_deg=mandala_overall_rotation_angle
-            )
+            tensor_std = current_pattern_tensor.std().item() if isinstance(current_pattern_tensor, torch.Tensor) else 'N/A'
+            logger.debug(f"Scheduled_update - Updating visuals with tensor (mean: {tensor_mean:.4f}, std: {tensor_std:.4f}), Overall Rotation: {mandala_overall_rotation_angle:.2f}")
+            
+            # Update visualization in a non-blocking way
+            try:
+                vector_vis.update_geometric_mandala_pyglet(
+                    current_pattern_tensor, pyglet_batch,
+                    group_foreground=pyglet_group_foreground,
+                    group_background=pyglet_group_background,
+                    window_width=pyglet_window.width, window_height=pyglet_window.height,
+                    mandala_shape_bias=flock_gen.config.mandala_shape_bias,
+                    overall_rotation_angle_deg=mandala_overall_rotation_angle
+                )
+            except Exception as e:
+                logger.error(f"Error updating mandala visualization: {e}", exc_info=True)
         
-        stars_to_remove = []
-        for star in active_stars:
-            if not star.update(dt):
-                stars_to_remove.append(star)
-        
-        for star in stars_to_remove:
-            star.delete()
-            active_stars.remove(star)
-        
-        # Update and remove EntendreGlyphs
-        glyphs_to_remove = []
-        for glyph in active_glyphs:
-            if not glyph.update(dt):
-                glyphs_to_remove.append(glyph)
-        
-        for glyph in glyphs_to_remove:
-            glyph.delete()
-            active_glyphs.remove(glyph)
+        # Update stars and glyphs with error handling
+        try:
+            stars_to_remove = []
+            for star in active_stars:
+                if not star.update(dt):
+                    stars_to_remove.append(star)
+            
+            for star in stars_to_remove:
+                star.delete()
+                active_stars.remove(star)
+            
+            glyphs_to_remove = []
+            for glyph in active_glyphs:
+                if not glyph.update(dt):
+                    glyphs_to_remove.append(glyph)
+            
+            for glyph in glyphs_to_remove:
+                glyph.delete()
+                active_glyphs.remove(glyph)
+        except Exception as e:
+            logger.error(f"Error updating stars/glyphs: {e}", exc_info=True)
             
         logger.debug(f"Scheduled_update - END - cycle: {generation_cycle_count-1}, Active Stars: {len(active_stars)}, Active Glyphs: {len(active_glyphs)}")
 
-    pyglet.gl.glClearColor(0.1, 0.1, 0.1, 1.0)
-    stop_event.clear() # stop_event is already cleared at the top, but re-clearing after setup is fine.
-    logger.info("Starting Pyglet app with integrated asyncio/Pyglet event loop...")
-
+    # Add memory tracking to the main loop
     try:
         while not pyglet_window.has_exit and not stop_event.is_set():
-            dt = pyglet.clock.tick() # Get DT, advances pyglet clock, allows event polling
-
-            # Process Pyglet platform events (OS messages, input, etc.)
-            pyglet.app.platform_event_loop.step(timeout=1/200.0) 
-
-            # Explicitly dispatch Pyglet window events (like on_draw, on_resize, etc.)
-            pyglet_window.dispatch_events() # This should ensure on_draw is called if needed
-
-            if pyglet_window.has_exit or stop_event.is_set(): 
-                break
-
-            await scheduled_update(dt) # Run our main async update logic
-
-            pyglet_window.flip() # Ensure the frame is displayed
-
-            await asyncio.sleep(0.001) 
+            # Process Pyglet events first
+            pyglet.clock.tick()
+            pyglet_window.dispatch_events()
+            
+            # Run our async update with timeout
+            try:
+                await asyncio.wait_for(scheduled_update(0.016), timeout=0.05)  # 50ms timeout
+            except asyncio.TimeoutError:
+                logger.warning("Scheduled update took too long, skipping frame")
+                continue
+            except Exception as e:
+                logger.error(f"Error in scheduled update: {e}", exc_info=True)
+                continue
+            
+            # Draw the frame
+            try:
+                pyglet_window.clear()
+                pyglet.gl.glClear(pyglet.gl.GL_COLOR_BUFFER_BIT)
+                pyglet_batch.draw()
+                pyglet_fps_display.draw()
+                pyglet_window.flip()
+            except Exception as e:
+                logger.error(f"Error drawing frame: {e}", exc_info=True)
+                continue
+            
+            # Adaptive sleep based on frame time
+            frame_time = pyglet.clock.get_fps()
+            if frame_time > 0:
+                sleep_time = max(0.001, 1.0/frame_time - 0.016)  # Target 60 FPS
+                await asyncio.sleep(sleep_time)
+            else:
+                await asyncio.sleep(0.001)
 
     except Exception as e:
         logger.error(f"Error in Pyglet/asyncio main loop: {e}", exc_info=True)
-        stop_event.set() # Ensure stop_event is set to facilitate graceful shutdown
+        stop_event.set()
     finally:
         # Ensure Pyglet window is closed if it hasn't been already (e.g., if loop exited due to stop_event)
         if pyglet_window and not pyglet_window.has_exit:
@@ -718,22 +791,22 @@ async def resource_aware_swarm():
 async def emotional_resonance_swarm():
     """Demonstrates a swarm that focuses on emotional resonance and coherence."""
     config = FlockConfig(
-        num_models=2,
-        flock_alignment=0.8,
-        flock_cohesion=0.6,
-        flock_separation=0.1
+        num_models=12,
+        flock_alignment=0.87,
+        flock_cohesion=0.68,
+        flock_separation=0.13
     )
     
     generator = FlockGenerator(
-        model_names=["gpt2", "distilgpt2"],
+        model_names=["gpt2", "distilgpt2", "EleutherAI/gpt-neo-125M", "EleutherAI/gpt-neo-125M", "EleutherAI/gpt-neo-125M", "EleutherAI/gpt-neo-125M", "EleutherAI/gpt-neo-125M", "EleutherAI/gpt-neo-125M", "EleutherAI/gpt-neo-125M", "EleutherAI/gpt-neo-125M", "EleutherAI/gpt-neo-125M", "EleutherAI/gpt-neo-125M"],
         config=config
     )
     
     if generator.models:
         generator.pattern_manager = PatternManager(
             model=generator.models[0].model,
-            pattern_depth=3,
-            base_seed=42
+            pattern_depth=8,
+            base_seed=53
         )
     else:
         raise ValueError("FlockGenerator has no models loaded.")
@@ -745,19 +818,19 @@ async def emotional_resonance_swarm():
     
     emotional_states = []
     timesteps = []
-    final_text_results = [] # Store final text results across iterations
+    exegetical_states = [] # Store final text results across iterations
     
     for i in range(3):
         # Generate results - expecting List[Tuple[str, torch.Tensor]]
         results_tuples = await generator.generate_batch(
             prompts=emotional_prompts,
-            num_iterations=1 # Single flocking iteration per loop
+            num_iterations=2 # Single flocking iteration per loop
         )
         
         # Extract text results for this iteration
         current_text_results = [text for text, tensor in results_tuples]
         if i == 2: # Keep results from the last iteration
-            final_text_results = current_text_results
+            exegetical_states = current_text_results
 
         # Record emotional state (this part seems independent of generate_batch results)
         if hasattr(generator.pattern_manager, 'emotional_state'):
@@ -784,7 +857,7 @@ async def emotional_resonance_swarm():
     emotional_fig = visualizer.visualize_emotional_state(emotional_states, timesteps)
     
     # Return final text results and figure
-    return final_text_results, emotional_fig
+    return exegetical_states, emotional_fig
 
 # Vignette 5: Cross-Language Harmony Swarm
 async def cross_language_harmony_swarm():
@@ -857,78 +930,509 @@ async def cross_language_harmony_swarm():
     # Return text results and figures
     return text_results, embedding_fig, language_fig
 
-async def run_vignettes():
-    """Run all vignettes and display results."""
-    vignettes = {
-        "Language-Specific Swarm": language_specific_swarm,
-        "Pattern Evolution Swarm": pattern_evolution_swarm,
-        "Resource-Aware Swarm": resource_aware_swarm,
-        "Emotional Resonance Swarm": emotional_resonance_swarm,
-        "Cross-Language Harmony Swarm": cross_language_harmony_swarm
-    }
+# Vignette 6: Geometric Reflection Game
+async def geometric_reflection_game(save_video: bool = True, video_path: Optional[str] = None):
+    """Implements a geometric reflection game using an icosahedral lattice of voices."""
+    # Initialize with a single model for the base generation
+    config = FlockConfig(
+        num_models=1,  # We'll handle the 30 voices geometrically
+        batch_size=1,
+        max_length=128,
+        temperature=0.7,
+        pattern_depth=8,  # Deeper pattern depth for more complex reflections
+        flock_alignment=0.87,  # High alignment for coherent reflections
+        flock_cohesion=0.68,
+        flock_separation=0.13
+    )
     
-    for name, vignette in vignettes.items():
-        print(f"\n=== Running Vignette: {name} ===")
-        try:
-            # Run the async vignette function
-            results = await vignette()
+    generator = FlockGenerator(
+        model_names=["gpt2"],  # Single base model
+        config=config
+    )
+    
+    if not generator.models:
+        raise ValueError("FlockGenerator has no models loaded.")
+    
+    # Initialize pattern manager with resonant modes for geometric structure
+    generator.pattern_manager = PatternManager(
+        model=generator.models[0].model,
+        pattern_depth=config.pattern_depth,
+        base_seed=42
+    )
+    
+    # Create icosahedral lattice of 30 voices
+    # Using golden ratio for icosahedron vertices
+    phi = (1 + np.sqrt(5)) / 2
+    vertices = []
+    
+    # Generate the 12 vertices of an icosahedron
+    for x in [-1, 1]:
+        for y in [-1, 1]:
+            for z in [-1, 1]:
+                vertices.append(np.array([x, y, z]))
+    
+    for i in range(3):
+        for j in range(2):
+            v = np.zeros(3)
+            v[i] = phi
+            v[(i + 1) % 3] = (-1) ** j
+            vertices.append(v)
+            v = np.zeros(3)
+            v[i] = -phi
+            v[(i + 1) % 3] = (-1) ** j
+            vertices.append(v)
+    
+    # Normalize vertices to unit sphere
+    vertices = [v / np.linalg.norm(v) for v in vertices]
+    
+    # Create 30 voices by interpolating between vertices
+    voices = []
+    for i in range(len(vertices)):
+        for j in range(i + 1, len(vertices)):
+            if np.dot(vertices[i], vertices[j]) > 0.5:  # Only connect nearby vertices
+                mid = (vertices[i] + vertices[j]) / 2
+                voices.append(mid / np.linalg.norm(mid))
+    
+    # Ensure we have exactly 30 voices
+    while len(voices) < 30:
+        # Add interpolated points between existing voices
+        i, j = np.random.choice(len(voices), 2, replace=False)
+        mid = (voices[i] + voices[j]) / 2
+        voices.append(mid / np.linalg.norm(mid))
+    voices = voices[:30]  # Trim to exactly 30
+    
+    # Initialize voice states with random vectors in the embedding space
+    hidden_size = generator.models[0].model.config.hidden_size
+    voice_states = []
+    for _ in range(30):
+        # Create random vector in the embedding space
+        random_vec = torch.randn(hidden_size)
+        random_vec = random_vec / random_vec.norm()  # Normalize
+        voice_states.append(random_vec)
+    
+    # Initialize dynamic connections
+    # Each voice can have up to 5 connections, but they can change over time
+    voice_connections = [[] for _ in range(30)]
+    connection_strengths = np.zeros((30, 30))  # Track connection strengths
+    
+    # Initial connections based on geometric proximity
+    for i, voice in enumerate(voices):
+        distances = [np.arccos(np.clip(np.dot(voice, other), -1.0, 1.0)) for other in voices]
+        # Get indices of 5 nearest neighbors (excluding self)
+        neighbor_indices = np.argsort(distances)[1:6]  # Skip first (self)
+        voice_connections[i] = neighbor_indices.tolist()
+        # Initialize connection strengths based on geometric proximity
+        for j in neighbor_indices:
+            connection_strengths[i, j] = 1.0 - distances[j] / np.pi
+    
+    # Run IX tokens of generation with reflections
+    IX = 10  # Number of iterations
+    reflection_results = []
+    
+    # Create figure for visualization
+    fig = plt.figure(figsize=(15, 10))
+    
+    # Create subplots for different visualizations
+    ax1 = fig.add_subplot(221, projection='3d')  # Voice positions
+    ax2 = fig.add_subplot(222)  # Projection strengths
+    ax3 = fig.add_subplot(223)  # Reflection magnitudes
+    ax4 = fig.add_subplot(224)  # Connection evolution
+    
+    # Initialize animation writer if saving video
+    writer = None
+    if save_video:
+        if video_path is None:
+            video_path = "geometric_reflection_game.mp4"
+        writer = FFMpegWriter(fps=12, bitrate=2000)
+        writer.setup(fig, video_path, dpi=100)
+    
+    try:
+        for iteration in range(IX):
+            logger.info(f"Geometric Reflection Game - Iteration {iteration + 1}/{IX}")
             
-            # Process results based on expected return type (text list + figures)
-            if isinstance(results, tuple) and len(results) >= 1:
-                text_results = results[0]
-                figures = results[1:] # Can be one or more figures
+            # Generate base text from the initial random vector
+            base_prompt = "Reflect on the nature of consciousness:"
+            results = await generator.generate_batch(
+                prompts=[base_prompt],
+                num_iterations=1
+            )
+            
+            if not results:
+                logger.warning("No results generated in iteration {iteration + 1}")
+                continue
                 
-                print("\nGenerated Text:")
-                if isinstance(text_results, list):
-                    for i, result in enumerate(text_results):
-                        print(f"\nResult {i + 1}:")
-                        print(result)
-                else:
-                    print(f"\nResult 1:") # Handle if only one text result is returned
-                    print(text_results)
+            base_text, base_tensor = results[0]
+            
+            # Project base tensor onto each voice's space
+            voice_projections = []
+            for i, voice in enumerate(voices):
+                # Debug original shapes
+                logger.debug(f"base_tensor shape: {base_tensor.shape}")
+                logger.debug(f"voice shape: {voice.shape}")
                 
-                if figures:
-                    print(f"\nVisualizations generated ({len(figures)} figure(s)). Check the plots.")
-                    # Note: matplotlib figures might show automatically or need plt.show() depending on environment
+                # Convert voice direction to tensor space, but keep it raw
+                voice_tensor = torch.tensor(voice, dtype=base_tensor.dtype, device=base_tensor.device)
+                logger.debug(f"voice_tensor shape after conversion: {voice_tensor.shape}")
+                
+                # Work with the raw base tensor - no PCA, no averaging
+                # Just reshape to match dimensions for the dot product
+                base_tensor_flat = base_tensor.reshape(-1)  # Flatten everything
+                
+                # Ensure voice tensor is properly sized for projection
+                if base_tensor_flat.shape[0] % 3 == 0:
+                    # If base tensor is divisible by 3, repeat voice tensor accordingly
+                    voice_tensor_flat = voice_tensor.repeat(base_tensor_flat.shape[0] // 3)
                 else:
-                    print("\nNo visualizations returned.")
+                    # If not divisible by 3, pad the voice tensor to match
+                    padding_size = base_tensor_flat.shape[0] - (base_tensor_flat.shape[0] // 3) * 3
+                    voice_tensor_flat = torch.cat([
+                        voice_tensor.repeat(base_tensor_flat.shape[0] // 3),
+                        voice_tensor[:padding_size]
+                    ])
+                
+                # Debug shapes
+                logger.debug(f"base_tensor_flat shape: {base_tensor_flat.shape}")
+                logger.debug(f"voice_tensor_flat shape: {voice_tensor_flat.shape}")
+                
+                try:
+                    # Compute raw projection
+                    projection = torch.dot(base_tensor_flat, voice_tensor_flat)
+                    logger.debug(f"projection shape: {projection.shape}")
+                    voice_projections.append(projection)
+                except RuntimeError as e:
+                    logger.error(f"Error in projection calculation: {e}")
+                    # Fallback to a simple cosine similarity if dot product fails
+                    projection = torch.nn.functional.cosine_similarity(
+                        base_tensor_flat.unsqueeze(0),
+                        voice_tensor_flat.unsqueeze(0)
+                    )
+                    voice_projections.append(projection)
+            
+            # Update connections based on state similarity
+            for i in range(30):
+                for j in range(30):
+                    if i != j:
+                        # Compute cosine similarity between voice states
+                        similarity = torch.dot(voice_states[i], voice_states[j]).item()
+                        # Update connection strength with momentum
+                        connection_strengths[i, j] = 0.7 * connection_strengths[i, j] + 0.3 * similarity
+            
+            # Prune weak connections and form new ones
+            for i in range(30):
+                # Get current connections
+                current_connections = voice_connections[i]
+                
+                # Prune weak connections
+                current_connections = [j for j in current_connections 
+                                    if connection_strengths[i, j] > 0.3]
+                
+                # Find potential new connections
+                potential_connections = []
+                for j in range(30):
+                    if j != i and j not in current_connections:
+                        potential_connections.append((j, connection_strengths[i, j]))
+                
+                # Sort by strength and add strongest new connections
+                potential_connections.sort(key=lambda x: x[1], reverse=True)
+                while len(current_connections) < 5 and potential_connections:
+                    new_conn, strength = potential_connections.pop(0)
+                    if strength > 0.5:  # Only form strong connections
+                        current_connections.append(new_conn)
+                
+                # Update connections
+                voice_connections[i] = current_connections
+            
+            # Perform reflections between neighboring voices
+            new_voice_states = []
+            reflection_magnitudes = []
+            
+            for i, voice in enumerate(voices):
+                # Get current voice state
+                current_state = voice_states[i]
+                
+                # Get states of neighbors
+                neighbor_states = [voice_states[j] for j in voice_connections[i]]
+                
+                # Calculate reflection with weighted connections
+                reflection = torch.zeros_like(current_state)
+                total_weight = 0
+                for j, neighbor_state in enumerate(neighbor_states):
+                    weight = connection_strengths[i, voice_connections[i][j]]
+                    reflection += weight * (current_state + neighbor_state) / 2
+                    total_weight += weight
+                
+                if total_weight > 0:
+                    reflection = reflection / total_weight
+                
+                # Calculate reflection magnitude
+                reflection_magnitude = torch.norm(reflection - current_state).item()
+                reflection_magnitudes.append(reflection_magnitude)
+                
+                # Normalize reflection
+                reflection = reflection / reflection.norm()
+                
+                # Update voice state with reflection
+                new_state = (current_state + reflection) / 2
+                new_state = new_state / new_state.norm()
+                new_voice_states.append(new_state)
+            
+            # Update voice states
+            voice_states = new_voice_states
+            
+            # Store results
+            reflection_results.append({
+                'iteration': iteration + 1,
+                'base_text': base_text,
+                'voice_projections': voice_projections,
+                'voice_states': voice_states,
+                'reflection_magnitudes': reflection_magnitudes,
+                'connection_strengths': connection_strengths.copy()
+            })
+            
+            # Update visualizations
+            ax1.clear()
+            ax2.clear()
+            ax3.clear()
+            ax4.clear()
+            
+            # Plot 1: Voice positions and connections
+            for i, voice in enumerate(voices):
+                # Color based on projection strength
+                color = plt.cm.viridis(voice_projections[i].item())
+                ax1.scatter(*voice, c=[color], alpha=0.6)
+                # Draw connections to neighbors with strength-based opacity
+                for j in voice_connections[i]:
+                    strength = connection_strengths[i, j]
+                    ax1.plot([voice[0], voices[j][0]],
+                            [voice[1], voices[j][1]],
+                            [voice[2], voices[j][2]], 
+                            'gray', alpha=0.3 * strength)
+            ax1.set_title('Voice Positions and Connections')
+            
+            # Plot 2: Projection strengths
+            ax2.bar(range(len(voice_projections)), [p.item() for p in voice_projections])
+            ax2.set_title('Projection Strengths')
+            ax2.set_xlabel('Voice Index')
+            ax2.set_ylabel('Projection Strength')
+            
+            # Plot 3: Reflection magnitudes
+            ax3.bar(range(len(reflection_magnitudes)), reflection_magnitudes)
+            ax3.set_title('Reflection Magnitudes')
+            ax3.set_xlabel('Voice Index')
+            ax3.set_ylabel('Reflection Magnitude')
+            
+            # Plot 4: Connection evolution
+            if iteration > 0:
+                prev_strengths = reflection_results[-2]['connection_strengths']
+                strength_changes = np.abs(connection_strengths - prev_strengths)
+                ax4.imshow(strength_changes, cmap='viridis')
+                ax4.set_title('Connection Strength Changes')
+                ax4.set_xlabel('Voice Index')
+                ax4.set_ylabel('Voice Index')
+                plt.colorbar(ax4.images[0], ax=ax4, label='Change Magnitude')
+            
+            plt.tight_layout()
+            
+            # Save frame if writing video
+            if writer is not None:
+                writer.grab_frame()
+            
+            logger.info(f"Completed iteration {iteration + 1} with {len(voice_states)} voice reflections")
+    
+    finally:
+        # Clean up video writer
+        if writer is not None:
+            writer.finish()
+    
+    # Return the reflection results and final visualization
+    return reflection_results, fig
 
-            else:
-                 # Handle cases where only text results might be returned (though unlikely based on vignette structure)
-                print("\nGenerated Text (raw result):")
-                print(results)
+@ray.remote
+class GeometricReflectionWorker:
+    """Ray actor for running geometric reflection games in parallel."""
+    def __init__(self, model_name: str = "gpt2"):
+        self.model_name = model_name
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        
+    async def run_game(self, 
+                      num_iterations: int = 10,
+                      save_video: bool = True,
+                      video_path: Optional[str] = None) -> Dict:
+        """Run a single geometric reflection game."""
+        config = FlockConfig(
+            num_models=1,
+            batch_size=1,
+            max_length=128,
+            temperature=0.7,
+            pattern_depth=8,
+            flock_alignment=0.87,
+            flock_cohesion=0.68,
+            flock_separation=0.13
+        )
+        
+        generator = FlockGenerator(
+            model_names=[self.model_name],
+            config=config
+        )
+        
+        # Run the game and return results
+        results, fig = await geometric_reflection_game(
+            save_video=save_video,
+            video_path=video_path
+        )
+        
+        return {
+            'results': results,
+            'video_path': video_path if save_video else None
+        }
 
-        except Exception as e:
-            logger.error(f"Error in vignette '{name}': {e}", exc_info=True) # Log full traceback
-            print(f"\n--- ERROR in vignette '{name}': {e} ---")
-            # Optionally re-raise or continue to next vignette
-            # raise Exception(f"Error in vignette {name}: {e}") from e
-            print(f"--- Skipping vignette '{name}' due to error. ---")
+def run_parallel_reflection_games(num_games: int = 4, output_dir: str = "reflection_games"):
+    """Run multiple geometric reflection games in parallel using Ray."""
+    # Initialize Ray
+    ray.init()
+    
+    # Create output directory
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Create workers
+    workers = [GeometricReflectionWorker.remote() for _ in range(num_games)]
+    
+    # Run games in parallel
+    futures = []
+    for i in range(num_games):
+        video_path = os.path.join(output_dir, f"reflection_game_{i}.mp4")
+        future = workers[i].run_game.remote(
+            num_iterations=10,
+            save_video=True,
+            video_path=video_path
+        )
+        futures.append(future)
+    
+    # Get results
+    results = ray.get(futures)
+    
+    # Shutdown Ray
+    ray.shutdown()
+    
+    return results
+
+async def run_vignettes_with_video(output_dir: str = "vignette_videos"):
+    """Run all vignettes and save their visualizations as videos."""
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Run geometric reflection game
+    reflection_results, fig = await geometric_reflection_game(
+        save_video=True,
+        video_path=os.path.join(output_dir, "geometric_reflection.mp4")
+    )
+    
+    # Save the final figure
+    plt.savefig(os.path.join(output_dir, "geometric_reflection_final.png"))
+    plt.close(fig)
+    
+    # Run parallel games
+    parallel_results = run_parallel_reflection_games(
+        num_games=4,
+        output_dir=os.path.join(output_dir, "parallel_games")
+    )
+    
+    return {
+        'reflection_results': reflection_results,
+        'parallel_results': parallel_results,
+        'output_dir': output_dir
+    }
+
+def create_visualization_notebook(output_dir: str = "vignette_videos"):
+    """Create a Jupyter notebook to display the results."""
+    notebook_content = f"""# Geometric Reflection Game Visualization
+
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+from IPython.display import HTML, display
+import os
+import json
+import numpy as np
+
+# Set up the output directory
+output_dir = "{output_dir}"
+
+# Display the final state visualization
+plt.figure(figsize=(15, 10))
+img = plt.imread(os.path.join(output_dir, "geometric_reflection_final.png"))
+plt.imshow(img)
+plt.axis('off')
+plt.title('Final State of Geometric Reflection Game')
+plt.show()
+
+# Display the main video
+from IPython.display import Video
+video_path = os.path.join(output_dir, "geometric_reflection.mp4")
+display(Video(video_path, embed=True))
+
+# Display parallel game videos
+parallel_dir = os.path.join(output_dir, "parallel_games")
+print("\\nParallel Game Results:")
+for i in range(4):
+    video_path = os.path.join(parallel_dir, f"reflection_game_{i}.mp4")
+    print(f"\\nGame {i+1}:")
+    display(Video(video_path, embed=True))
+
+# Create an interactive visualization of the reflection results
+def plot_reflection_metrics(results):
+    iterations = [r['iteration'] for r in results]
+    avg_projections = [np.mean([p.item() for p in r['voice_projections']]) for r in results]
+    avg_reflections = [np.mean(r['reflection_magnitudes']) for r in results]
+    
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
+    
+    ax1.plot(iterations, avg_projections, 'b-', label='Average Projection')
+    ax1.set_title('Average Projection Strength Over Time')
+    ax1.set_xlabel('Iteration')
+    ax1.set_ylabel('Projection Strength')
+    ax1.grid(True)
+    
+    ax2.plot(iterations, avg_reflections, 'r-', label='Average Reflection')
+    ax2.set_title('Average Reflection Magnitude Over Time')
+    ax2.set_xlabel('Iteration')
+    ax2.set_ylabel('Reflection Magnitude')
+    ax2.grid(True)
+    
+    plt.tight_layout()
+    plt.show()
+
+# Load and plot the reflection results
+with open(os.path.join(output_dir, 'reflection_results.json'), 'r') as f:
+    results = json.load(f)
+plot_reflection_metrics(results)
+
+# Display some example generated texts
+print("\\nExample Generated Texts:")
+for i, result in enumerate(results):
+    print(f"\\nIteration {i+1}:")
+    print(result['base_text'][:200] + "...")
+"""
+    
+    # Save the notebook
+    notebook_path = os.path.join(output_dir, "visualization.ipynb")
+    with open(notebook_path, 'w') as f:
+        f.write(notebook_content)
+    
+    return notebook_path
 
 if __name__ == "__main__":
-    # Configure logging to see the output from the callback
-    # Set level to DEBUG to see the new detailed star update logs
-    logging.basicConfig(level=logging.DEBUG, 
-                        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    # Configure logging
+    logging.basicConfig(level=logging.INFO, 
+                       format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     
-    # To run the Pyglet based pattern evolution:
-    # asyncio.run(pattern_evolution_swarm()) 
+    # Run the vignettes with video saving
+    output_dir = "vignette_videos"
+    results = asyncio.run(run_vignettes_with_video(output_dir))
     
-    # To run all vignettes (be mindful of mixed graphics backends):
-    # asyncio.run(run_vignettes())
-
-    # Defaulting to pattern_evolution_swarm for testing Pyglet
-    # Ensure any previous matplotlib windows are closed if running in interactive environment.
-    try:
-        asyncio.run(pattern_evolution_swarm())
-    except KeyboardInterrupt:
-        logger.info("Keyboard interrupt received, shutting down.")
-        stop_event.set() # Signal the loop to stop
-        if pyglet_window:
-            pyglet_window.close()
-    except Exception as e:
-        logger.error(f"Unhandled error in main execution: {e}", exc_info=True)
-    finally:
-        # Ensure stop_event is set so any scheduled async tasks can see it
-        stop_event.set() 
-        logger.info("Application terminated.") 
+    # Save the reflection results for the notebook
+    with open(os.path.join(output_dir, 'reflection_results.json'), 'w') as f:
+        json.dump(results['reflection_results'], f)
+    
+    # Create the visualization notebook
+    notebook_path = create_visualization_notebook(output_dir)
+    print(f"\nVisualization notebook created at: {notebook_path}")
+    print("You can now run this notebook to view the results interactively.") 

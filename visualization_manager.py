@@ -337,44 +337,142 @@ class VectorDrivenVisualizer:
         Updates or re-creates Pyglet shapes for a geometric mandala and adds them to the batch.
         Shapes are stored in self.mandala_pyglet_shapes.
         """
-        # 1. Delete old debug star if it exists
-        if self.debug_star is not None:
-            try:
-                self.debug_star.delete()
-                self.debug_star = None # Ensure it's cleared after deletion
-            except Exception as e:
-                logger.error(f"Error deleting debug_star: {e}")
-
-        # Clear existing mandala shapes from the batch by deleting them
+        # Clear existing shapes
         for shape in self.mandala_pyglet_shapes:
             shape.delete() 
         self.mandala_pyglet_shapes.clear()
 
         plot_center_x = window_width / 2
         plot_center_y = window_height / 2
-        base_plot_radius = min(window_width, window_height) / 2.2 # Scale to fit window
+        base_plot_radius = min(window_width, window_height) / 2.2
 
-        # 2. Create and add new debug star for this frame, controlled by overall_rotation_angle_deg
-        debug_star_radius = base_plot_radius * 0.8 # Make it prominent
-        debug_star_angle_rad = math.radians(overall_rotation_angle_deg)
-        debug_star_x = plot_center_x + debug_star_radius * math.cos(debug_star_angle_rad)
-        debug_star_y = plot_center_y + debug_star_radius * math.sin(debug_star_angle_rad)
-        
+        error_occurred = False
+        error_message = ''
+        shapes_created = 0
         try:
-            self.debug_star = pyglet_shapes.Star(
-                x=debug_star_x, y=debug_star_y,
-                outer_radius=debug_star_radius * 0.2,
-                inner_radius=debug_star_radius * 0.1,
-                num_spikes=5,
-                color=(255, 0, 0, 255), # Bright red, fully opaque
+            # --- MINIMAL EGG: Always-visible Easter egg for rendering test ---
+            egg_width = min(window_width, window_height) * 0.25
+            egg_height = egg_width * 1.3
+            pastel_egg = pyglet_shapes.Ellipse(
+                x=plot_center_x,
+                y=plot_center_y,
+                a=egg_width,
+                b=egg_height,
+                segments=32,
+                color=(255, 230, 180),  # Pastel yellow
                 batch=batch,
                 group=group_foreground
             )
-            logger.info(f"Debug star created at ({debug_star_x:.2f}, {debug_star_y:.2f}) rot: {overall_rotation_angle_deg:.2f}")
+            self.mandala_pyglet_shapes.append(pastel_egg)
+            logger.info(f"Created pastel egg at ({plot_center_x}, {plot_center_y}) size=({egg_width}, {egg_height})")
+            shapes_created += 1
+            # --- END MINIMAL EGG ---
         except Exception as e:
-            logger.error(f"Error creating debug_star: {e}")
+            logger.error(f"Error creating pastel egg: {e}", exc_info=True)
+            error_occurred = True
+            error_message = f"Egg error: {e}"
+        try:
+            # Add radial gradient lines
+            num_radial_lines = 5  # Five-fold symmetry for origami
+            for i in range(num_radial_lines):
+                angle = (2 * math.pi * i) / num_radial_lines + math.radians(overall_rotation_angle_deg)
+                end_x = plot_center_x + base_plot_radius * 1.5 * math.cos(angle)
+                end_y = plot_center_y + base_plot_radius * 1.5 * math.sin(angle)
+                for j in range(3):
+                    try:
+                        gradient_line = pyglet_shapes.Line(
+                            x=plot_center_x,
+                            y=plot_center_y,
+                            x2=end_x * (0.8 + j * 0.1),
+                            y2=end_y * (0.8 + j * 0.1),
+                            color=(100, 100, 200, 30 - j * 10),
+                            batch=batch,
+                            group=group_background
+                        )
+                        self.mandala_pyglet_shapes.append(gradient_line)
+                        logger.info(f"Created gradient line {i}-{j} from ({plot_center_x},{plot_center_y}) to ({end_x},{end_y})")
+                        shapes_created += 1
+                    except Exception as e:
+                        logger.error(f"Error creating gradient line {i}-{j}: {e}", exc_info=True)
+                        error_occurred = True
+                        error_message = f"Line error: {e}"
+        except Exception as e:
+            logger.error(f"Error in radial lines block: {e}", exc_info=True)
+            error_occurred = True
+            error_message = f"Radial lines error: {e}"
+        try:
+            # Add origami-inspired planes
+            num_planes = 5
+            for i in range(num_planes):
+                plane_radius = base_plot_radius * (1.0 + i * 0.15)
+                plane_opacity = int(80 * (1.0 - i * 0.15))
+                try:
+                    gradient_circle = pyglet_shapes.Circle(
+                        x=plot_center_x,
+                        y=plot_center_y,
+                        radius=plane_radius,
+                        color=(50, 50, 100, plane_opacity),
+                        batch=batch,
+                        group=group_background
+                    )
+                    self.mandala_pyglet_shapes.append(gradient_circle)
+                    logger.info(f"Created gradient circle {i} at ({plot_center_x},{plot_center_y}) r={plane_radius}")
+                    shapes_created += 1
+                except Exception as e:
+                    logger.error(f"Error creating gradient circle {i}: {e}", exc_info=True)
+                    error_occurred = True
+                    error_message = f"Circle error: {e}"
+                for j in range(5):
+                    triangle_angle = (2 * math.pi * j) / 5 + math.radians(overall_rotation_angle_deg)
+                    triangle_size = plane_radius * 0.2
+                    center_x = plot_center_x + plane_radius * 0.7 * math.cos(triangle_angle)
+                    center_y = plot_center_y + plane_radius * 0.7 * math.sin(triangle_angle)
+                    try:
+                        triangle = pyglet_shapes.Triangle(
+                            x=center_x,
+                            y=center_y - triangle_size / math.sqrt(3),
+                            x2=center_x + triangle_size / 2,
+                            y2=center_y + triangle_size / (2 * math.sqrt(3)),
+                            x3=center_x - triangle_size / 2,
+                            y3=center_y + triangle_size / (2 * math.sqrt(3)),
+                            color=(100, 100, 200, plane_opacity),
+                            batch=batch,
+                            group=group_background
+                        )
+                        triangle.rotation = math.degrees(triangle_angle)
+                        self.mandala_pyglet_shapes.append(triangle)
+                        logger.info(f"Created triangle {i}-{j} at ({center_x},{center_y}) size={triangle_size}")
+                        shapes_created += 1
+                    except Exception as e:
+                        logger.error(f"Error creating triangle {i}-{j}: {e}", exc_info=True)
+                        error_occurred = True
+                        error_message = f"Triangle error: {e}"
+        except Exception as e:
+            logger.error(f"Error in origami planes block: {e}", exc_info=True)
+            error_occurred = True
+            error_message = f"Planes error: {e}"
+        logger.info(f"Total shapes created this frame: {shapes_created}")
+        if error_occurred and batch is not None:
+            # Display a visible error message in the window
+            try:
+                error_label = pyglet.text.Label(
+                    text=error_message,
+                    font_name='Arial',
+                    font_size=18,
+                    x=plot_center_x,
+                    y=window_height * 0.1,
+                    anchor_x='center',
+                    anchor_y='center',
+                    color=(255, 0, 0, 255),
+                    batch=batch,
+                    group=group_foreground
+                )
+                self.mandala_pyglet_shapes.append(error_label)
+            except Exception as e:
+                logger.error(f"Error displaying error label: {e}", exc_info=True)
 
-        dv_elements = 10 # Number of driving vector elements
+        # Get driving vector and continue with existing mandala generation
+        dv_elements = 10
         dv = self._get_driving_vector(pattern, num_elements=dv_elements)
         # Log the driving vector
         logger.info(f"Driving Vector (dv): {[f'{x:.3f}' for x in dv.tolist()]}")
@@ -429,14 +527,14 @@ class VectorDrivenVisualizer:
             segment_angle_deg = 360.0 / current_segments
             
             layer_hue = (start_hue + l_idx * hue_increment_per_layer) % 1.0
-            layer_saturation = saturation_base * (0.8 + layer_radius_norm * 0.2) # Outer layers more saturated
+            layer_saturation = saturation_base * (0.9 + layer_radius_norm * 0.1)  # Increased base saturation
             layer_saturation = min(1.0, max(0.0, layer_saturation))
-            layer_value = value_base * (1.0 - layer_radius_norm * 0.4) # Outer layers a bit dimmer
+            layer_value = value_base * (1.0 - layer_radius_norm * 0.3)  # Adjusted value range
             layer_value = min(1.0, max(0.0, layer_value))
             
             rgb_color = self._hsv_to_rgb(layer_hue, layer_saturation, layer_value)
             # Pyglet opacity for shapes is 0-255
-            opacity = int((alpha_base * (1.0 - layer_radius_norm * 0.5)) * 255) 
+            opacity = int((alpha_base * (1.0 - layer_radius_norm * 0.4)) * 255)  # Adjusted opacity range
             opacity = min(255, max(0, opacity))
 
             for s_idx in range(current_segments):

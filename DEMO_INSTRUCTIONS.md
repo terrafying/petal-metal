@@ -8,8 +8,7 @@ To get that "Disney-like" animation or an MP4, you'll want to record your screen
 
 *   **macOS**: QuickTime Player (comes built-in; File > New Screen Recording)
 *   **Cross-platform**: OBS Studio (free, open-source, and powerful)
-*   **Other tools**: Kap (GIFs on macOS), ScreenFlow (paid, macOS), Camtasia (paid, cross-platform)
-
+*   **Other tools**: Kap (GIFs on macOS)
 After recording, you can edit the footage to add annotations, zoom in on important details, and create a polished, distributable video.
 
 ## 🎬 Demonstration Steps
@@ -20,9 +19,8 @@ Follow these steps to showcase the key features of your project.
 
 1.  **Clone the Repository**: If you haven't already, clone your project:
     ```bash
-    # Replace 'yourusername' with your actual GitHub username/organization if different
-    git clone https://github.com/yourusername/petals-metal
-    cd petals-metal
+    # Replace 'terrafying' with your actual GitHub username/organization if different
+    git clone https://github.com/terrafying/petals-2-metal new-patella && cd new-patella
     ```
 2.  **Install Dependencies**: Ensure all dependencies are installed:
     ```bash

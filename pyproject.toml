@@ -13,4 +13,6 @@ dependencies = [
     "torch>=2.2.0",
     "transformers>=4.38.0",
     "hf-xet>=1.1.0",
+    "pyglet>=2.1.6",
+    "ray[tune]>=2.46.0",
 ]

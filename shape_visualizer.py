@@ -110,7 +110,7 @@ class ShapeVisualizer:
         weights = list(language_weights.values())
         
         # Create bar plot with enhanced styling
-        bars = sns.barplot(x=languages, y=weights, ax=ax1, palette='viridis')
+        bars = sns.barplot(x=languages, y=weights, ax=ax1, palette='viridis', legend=True, legend_out=True, log_scale=True)
         ax1.set_title("Language Weights", fontsize=12, pad=20)
         ax1.set_xticklabels(languages, rotation=45, ha='right')
         
