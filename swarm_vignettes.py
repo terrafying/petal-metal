@@ -27,6 +27,8 @@ import tempfile
 from pathlib import Path
 import json
 import psutil
+import pythonosc.udp_client
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -930,9 +932,49 @@ async def cross_language_harmony_swarm():
     # Return text results and figures
     return text_results, embedding_fig, language_fig
 
-# Vignette 6: Geometric Reflection Game
+class OSCVisualizationBridge:
+    def __init__(self, ip="127.0.0.1", port=8000):
+        self.client = pythonosc.udp_client.SimpleUDPClient(ip, port)
+        self.last_send_time = 0
+        self.send_interval = 1/30  # 30 Hz update rate
+        
+    def send_visualization_data(self, 
+                              voice_states: List[torch.Tensor],
+                              voice_projections: List[torch.Tensor],
+                              connection_strengths: np.ndarray,
+                              reflection_magnitudes: List[float],
+                              overall_rotation: float):
+        """Send visualization data to Max/MSP/Jitter via OSC."""
+        current_time = time.time()
+        if current_time - self.last_send_time < self.send_interval:
+            return
+            
+        # Send voice states as matrices
+        for i, state in enumerate(voice_states):
+            state_np = state.detach().cpu().numpy()
+            self.client.send_message(f"/petals/voice/{i}/state", state_np.tolist())
+            
+        # Send projections
+        for i, proj in enumerate(voice_projections):
+            self.client.send_message(f"/petals/voice/{i}/projection", float(proj))
+            
+        # Send connection strengths matrix
+        self.client.send_message("/petals/connections", connection_strengths.tolist())
+        
+        # Send reflection magnitudes
+        for i, mag in enumerate(reflection_magnitudes):
+            self.client.send_message(f"/petals/voice/{i}/reflection", float(mag))
+            
+        # Send overall rotation
+        self.client.send_message("/petals/rotation", float(overall_rotation))
+        
+        self.last_send_time = current_time
+
 async def geometric_reflection_game(save_video: bool = True, video_path: Optional[str] = None):
     """Implements a geometric reflection game using an icosahedral lattice of voices."""
+    # Initialize OSC bridge
+    osc_bridge = OSCVisualizationBridge()
+    
     # Initialize with a single model for the base generation
     config = FlockConfig(
         num_models=1,  # We'll handle the 30 voices geometrically
@@ -1236,6 +1278,15 @@ async def geometric_reflection_game(save_video: bool = True, video_path: Optiona
             # Save frame if writing video
             if writer is not None:
                 writer.grab_frame()
+            
+            # Send visualization data via OSC
+            osc_bridge.send_visualization_data(
+                voice_states=voice_states,
+                voice_projections=voice_projections,
+                connection_strengths=connection_strengths,
+                reflection_magnitudes=reflection_magnitudes,
+                overall_rotation=mandala_overall_rotation_angle
+            )
             
             logger.info(f"Completed iteration {iteration + 1} with {len(voice_states)} voice reflections")
     

@@ -15,4 +15,5 @@ dependencies = [
     "hf-xet>=1.1.0",
     "pyglet>=2.1.6",
     "ray[tune]>=2.46.0",
+    "python-osc>=1.9.3",
 ]
