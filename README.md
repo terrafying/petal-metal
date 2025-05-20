@@ -21,12 +21,13 @@ The primary way to experience the enhanced features, including the dynamic visua
 # Clone this repository (if you haven't already)
 # git clone https://github.com/yourusername/petals-metal
 # cd petals-metal
-
+# Install UV package manager (faster, stronger, harder, papa john)
+command -v uv || brew install uv
 # Install dependencies (ensure pyglet is included)
-pip install -r requirements.txt
+uv pip install -r requirements.txt
 
 # Run the pattern evolution swarm demo with Pyglet visualization
-python swarm_vignettes.py
+uv run python swarm_vignettes.py
 ```
 
 The demo will automatically:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from dataclasses import dataclass
 import multiprocessing as mp
 import sys
 from enum import Enum

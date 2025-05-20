@@ -116,7 +116,7 @@ class MemoryCache:
 
     async def _schedule_alloc(
         self, alloc_size: int, *descriptors: TensorDescriptor, timeout: Optional[float]
-    ) -> Sequence[Handle]:
+    ) -> Sequence[asyncio.Handle]:
         """
         This method should be called inside asyncio.shield() because:
             - hivemind.utils.enter_asynchronously() does not always release the lock on cancellation
@@ -192,7 +192,7 @@ class MemoryCache:
             self._memory_freed_event.clear()
 
     @contextlib.contextmanager
-    def use_cache(self, *handles: Handle) -> Sequence[torch.Tensor]:
+    def use_cache(self, *handles: asyncio.Handle) -> Sequence[torch.Tensor]:
         """
         Return one or more tensors previously allocated with allocate_cache,
 

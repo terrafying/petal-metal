@@ -12,14 +12,14 @@ from hivemind.proto import runtime_pb2
 from hivemind.utils.logging import get_logger
 from hivemind.utils.nested import nested_flatten
 
-from petals.data_structures import Handle, InferenceMetadata
+from petals.data_structures import InferenceMetadata
 from petals.server.backend import TransformerBackend
 from petals.server.task_pool import PrioritizedTaskPool
 from petals.server.task_prioritizer import TaskPrioritizerBase
 from petals.utils.convert_block import QuantType
 from petals.utils.misc import DUMMY, is_dummy
 from petals.utils.packaging import unpack_args_kwargs
-
+Handle = int
 # We prioritize short inference requests and make them use a *merged* inference pool,
 # so they are processed without interruptions and extra overheads
 # TODO: Increase the NF4 threshold once bitsandbytes ships efficient NF4 kernel for parallel forward
